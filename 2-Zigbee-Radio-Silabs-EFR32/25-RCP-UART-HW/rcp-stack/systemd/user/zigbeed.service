@@ -1,0 +1,27 @@
+[Unit]
+Description=Zigbee daemon (CPC)
+Requires=cpcd-bringup.service socat-zigbeed-pty.service
+After=cpcd-bringup.service socat-zigbeed-pty.service
+StartLimitIntervalSec=30s
+StartLimitBurst=5
+
+[Service]
+Type=simple
+Environment=ZIGBEED_PTY=/tmp/ttyZigbeed
+EnvironmentFile=-%h/.config/rcp-stack/rcp-stack.env
+RuntimeDirectory=rcp-stack
+RuntimeDirectoryMode=0700
+StateDirectory=rcp-stack/zigbeed
+StateDirectoryMode=0700
+WorkingDirectory=%S/rcp-stack/zigbeed
+ExecStartPre=%h/.config/rcp-stack/bin/rcp-ensure-dirs
+ExecStartPre=%h/.config/rcp-stack/bin/rcp-check-zigbeed-conf
+ExecStartPre=%h/.config/rcp-stack/bin/rcp-wait-cpcd
+ExecStartPre=%h/.config/rcp-stack/bin/rcp-wait-pty /tmp/ttyZigbeed
+ExecStartPre=%h/.config/rcp-stack/bin/rcp-check-command ZIGBEED_COMMAND
+ExecStart=%h/.config/rcp-stack/bin/rcp-run-command ZIGBEED_COMMAND
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=default.target

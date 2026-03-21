@@ -1,0 +1,76 @@
+#!/bin/sh
+#
+# S10network - Network initialization script for Lidl/Silvercrest gateway
+#
+# This script configures the loopback interface, adjusts CPU registers for
+# Realtek RTL865x family if necessary, generates once a custom MAC address for eth0
+# and store it in flash memory, and brings up eth0 with either static IP configuration
+# from /userdata/etc/eth0.conf or via DHCP.
+#
+# If /userdata/etc/eth0.conf exists, it should be of the form (adjust to your needs):
+#   IPADDR=192.168.1.100
+#   NETMASK=255.255.255.0
+#   GATEWAY=192.168.1.1
+# A /userdata/etc/eth0.bak file is provided as an example
+# These variables will be used to configure the eth0 interface with a static IP.
+#
+# J. Nilo - Nov 2025
+#
+
+ifconfig lo 127.0.0.1
+
+case "$1" in
+start)
+    echo "🌐 Starting network setup"
+
+    # Reuse persisted MAC if available, else generate a stable local MAC (02:...)
+    MACFILE="/userdata/etc/mac_address"
+
+    if [ -f "$MACFILE" ]; then
+        formatted_mac=$(cat "$MACFILE")
+        echo "🔁 Using persisted MAC address: $formatted_mac"
+    else
+        # Generate a locally administered MAC (U/L bit = 1, multicast bit = 0)
+        octets=$(hexdump -n5 -e '/1 ":%02X"' /dev/urandom)
+        formatted_mac="02${octets}"
+        echo "$formatted_mac" >"$MACFILE"
+        echo "✨ Generated and saved new MAC address: $formatted_mac"
+    fi
+
+    ifconfig eth0 hw ether "$formatted_mac"
+
+    # Bring up eth0 and configure IP
+    if [ -f /userdata/etc/eth0.conf ]; then
+        echo "🌐 Loading static IP configuration from /userdata/etc/eth0.conf"
+        . /userdata/etc/eth0.conf
+        ifconfig eth0 "$IPADDR" netmask "$NETMASK" up
+        route add default gw "$GATEWAY"
+        echo "$IPADDR" >/var/run/current_eth0_ip
+    else
+        echo "🌐 No static IP configuration found, starting DHCP client on eth0"
+        ifconfig eth0 up
+        sleep 1
+        HOSTNAME=$(cat /etc/hostname)
+        # 3 attempts (default) with a 3 sec interval (-T 3)
+        udhcpc -i eth0 -x hostname:"$HOSTNAME" -s /bin/udhcpc.script -S \
+            -p /var/run/udhcpc0.pid -T 3 -n 2>&1 | grep -v "no lease, failing"
+    fi
+    ;;
+stop)
+    echo "🛑 Stopping network"
+
+    if [ -f /var/run/udhcpc0.pid ]; then
+        kill "$(cat /var/run/udhcpc0.pid)"
+        rm -f /var/run/udhcpc0.pid
+    else
+        killall udhcpc
+    fi
+
+    ifconfig eth0 down
+    ;;
+restart)
+    echo "🔄 Restarting network"
+    $0 stop
+    $0 start
+    ;;
+esac

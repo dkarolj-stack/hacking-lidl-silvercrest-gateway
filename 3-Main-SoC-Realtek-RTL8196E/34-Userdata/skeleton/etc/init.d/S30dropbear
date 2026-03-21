@@ -1,0 +1,76 @@
+#!/bin/sh
+#
+# S30dropbear - Dropbear SSH server startup script (user-editable)
+#
+# This script starts or stops the Dropbear SSH server.
+# You can customize the DROPBEAR_OPTS variable below.
+#
+# Common Dropbear options:
+#   -p [port]   : Listen on specified port (default: 22)
+#   -w          : Disallow root logins
+#   -s          : Disable password logins (only pubkey allowed)
+#   -g          : Allow root logins without password (pubkey only)
+#   -F          : Run in foreground (useful for debugging)
+#   -K [seconds]: Disconnect if no traffic is transmitted during K seconds
+#
+# For all options: https://manned.org/dropbear.8
+#
+# J. Nilo - May 2025
+#
+DROPBEAR_OPTS="-p 22 -K 300"
+KEYDIR="/etc/dropbear"
+PIDFILE="/var/run/dropbear.pid"
+
+# Generate server keys only once at the first login
+generate_keys() {
+    echo "🔐 Checking Dropbear host keys..."
+
+    mkdir -p "$KEYDIR"
+    chmod 700 "$KEYDIR"
+    [ -f "$KEYDIR/dropbear_rsa_host_key" ] || {
+        echo "🔑 Generating RSA host key..."
+        dropbearkey -t rsa -f "$KEYDIR/dropbear_rsa_host_key"
+    }
+
+    [ -f "$KEYDIR/dropbear_ecdsa_host_key" ] || {
+        echo "🔑 Generating ECDSA host key..."
+        dropbearkey -t ecdsa -f "$KEYDIR/dropbear_ecdsa_host_key"
+    }
+
+    [ -f "$KEYDIR/dropbear_ed25519_host_key" ] || {
+        echo "🔑 Generating ED25519 host key..."
+        dropbearkey -t ed25519 -f "$KEYDIR/dropbear_ed25519_host_key"
+    }
+}
+# Fix permissions required by dropbear for pubkey authentication
+fix_permissions() {
+    chmod 750 /root
+    chmod 700 /userdata/ssh 2>/dev/null || true
+    chmod 600 /userdata/ssh/authorized_keys 2>/dev/null || true
+}
+
+case "$1" in
+start)
+    fix_permissions
+    generate_keys
+    echo "🚀 Starting Dropbear with options: $DROPBEAR_OPTS"
+    dropbear $DROPBEAR_OPTS
+    ;;
+stop)
+    echo "🛑 Stopping Dropbear..."
+    if [ -f "$PIDFILE" ]; then
+        kill "$(cat "$PIDFILE")" && rm -f "$PIDFILE"
+    else
+        killall dropbear 2>/dev/null
+    fi
+    ;;
+restart)
+    stop
+    sleep 1
+    start
+    ;;
+*)
+    echo "ℹ️  Usage: $0 {start|stop|restart}"
+    exit 1
+    ;;
+esac

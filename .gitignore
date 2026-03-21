@@ -1,3 +1,82 @@
 *.docx
 *.bat
 node_modules/
+
+# Compiled objects and binaries
+*.o
+*.bin
+*.elf
+*.gbl
+*.hex
+*.s37
+
+# Exception: pre-built firmware files (only .gbl for UART flashing)
+!2-Zigbee-Radio-Silabs-EFR32/*/firmware/*.gbl
+# Exception: bootloader flash image
+!3-Main-SoC-Realtek-RTL8196E/31-Bootloader/boot.bin
+*.img
+*.img.gz
+
+# Build directories
+build/
+out/
+Output/
+
+# Toolchains and external tools
+x-tools/
+silabs-tools/
+silabs-flasher/
+SimplicityStudio/
+1-Build-Environment/11-realtek-tools/bin/
+1-Build-Environment/11-realtek-tools/mtd-utils/
+
+# LZMA build artifacts
+1-Build-Environment/11-realtek-tools/lzma-4.65/CPP/7zip/Compress/LZMA_Alone/lzma
+1-Build-Environment/11-realtek-tools/lzma-loader/loader
+1-Build-Environment/11-realtek-tools/cvimg/cvimg
+
+# Source archives
+*.tar.bz2
+*.tar.gz
+*.tar.xz
+
+# Extracted source directories
+busybox-*/
+nano-*/
+ncurses-*/
+DROPBEAR_*/
+
+# Install directories
+ncursesw-install/
+
+# Temporary files
+*.log
+*.tmp
+
+# Generated config files
+autoconf2.h
+.*.flags
+.config/
+.silabs/
+.uc/
+
+# Linker/debug files
+*.elf.txt
+system.map
+
+# Bootloader artifacts
+3-Main-SoC-Realtek-RTL8196E/31-Bootloader/src/btcode/boot
+3-Main-SoC-Realtek-RTL8196E/31-Bootloader/23-Bootloader/
+
+# Extracted kernel sources
+3-Main-SoC-Realtek-RTL8196E/32-Kernel/linux-*/
+
+# Compiled binaries in skeleton
+3-Main-SoC-Realtek-RTL8196E/33-Rootfs/skeleton/bin/busybox
+3-Main-SoC-Realtek-RTL8196E/33-Rootfs/skeleton/bin/dropbearmulti
+3-Main-SoC-Realtek-RTL8196E/34-Userdata/skeleton/usr/bin/nano
+3-Main-SoC-Realtek-RTL8196E/34-Userdata/skeleton/usr/bin/serialgateway
+3-Main-SoC-Realtek-RTL8196E/34-Userdata/serialgateway/src/serialgateway
+
+# packages
+packages/

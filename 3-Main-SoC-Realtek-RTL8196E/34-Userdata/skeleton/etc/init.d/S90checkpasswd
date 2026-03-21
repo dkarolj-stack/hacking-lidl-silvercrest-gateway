@@ -1,0 +1,37 @@
+#!/bin/sh
+# S90checkpasswd — Check if default root password is still in use
+#
+# This script runs at boot and warns the user if the default password
+# "root" has not been changed. Once changed, it removes itself.
+#
+# Default password hash (DES crypt of "root"): 60wirU8QO5BxQ
+
+PASSWD_FILE="/userdata/etc/passwd"
+DEFAULT_HASH="60wirU8QO5BxQ"
+SCRIPT_PATH="/userdata/etc/init.d/S90checkpasswd"
+
+case "$1" in
+    start)
+        # Extract current password hash for root
+        CURRENT_HASH=$(grep "^root:" "$PASSWD_FILE" 2>/dev/null | cut -d: -f2)
+
+        if [ "$CURRENT_HASH" = "$DEFAULT_HASH" ]; then
+            # Default password still in use - warn user
+            echo ""
+            echo "⚠️  WARNING: Default root password (e.g. root) is still in use!"
+            echo "🔐 Please change it now with: passwd"
+            echo ""
+        else
+            # Password has been changed - remove this script
+            rm -f "$SCRIPT_PATH"
+        fi
+        ;;
+    stop)
+        ;;
+    *)
+        echo "Usage: $0 {start|stop}"
+        exit 1
+        ;;
+esac
+
+exit 0

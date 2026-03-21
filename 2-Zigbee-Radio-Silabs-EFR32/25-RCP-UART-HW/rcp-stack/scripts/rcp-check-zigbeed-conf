@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+conf="/usr/local/etc/zigbeed.conf"
+
+if [ ! -e "$conf" ]; then
+  exit 0
+fi
+
+if [ ! -r "$conf" ]; then
+  echo "warn: zigbeed config is not readable: $conf" >&2
+  exit 0
+fi
+
+if [ ! -O "$conf" ]; then
+  echo "warn: zigbeed config is not user-owned: $conf" >&2
+  echo "warn: zigbeed always reads this file; prefer removing it or using a user-scoped build." >&2
+fi
+
+yaml_lines=0
+kv_lines=0
+
+while IFS= read -r line; do
+  line="${line%%#*}"
+  line="${line#"${line%%[![:space:]]*}"}"
+  [ -z "$line" ] && continue
+
+  has_colon=0
+  has_eq=0
+  if [[ "$line" == *:* ]]; then
+    has_colon=1
+    before_colon="${line%%:*}"
+    pos_colon=${#before_colon}
+  fi
+  if [[ "$line" == *"="* ]]; then
+    has_eq=1
+    before_eq="${line%%=*}"
+    pos_eq=${#before_eq}
+  fi
+
+  if (( has_colon && (!has_eq || pos_colon < pos_eq) )); then
+    yaml_lines=$((yaml_lines + 1))
+    continue
+  fi
+
+  if (( has_eq && (!has_colon || pos_eq < pos_colon) )); then
+    kv_lines=$((kv_lines + 1))
+    continue
+  fi
+done < "$conf"
+
+if (( yaml_lines > 0 && kv_lines > 0 )); then
+  echo "error: $conf mixes YAML (key: value) and key=value formats." >&2
+  exit 1
+fi
+
+if (( kv_lines > 0 )); then
+  echo "warn: $conf uses key=value. zigbeed 8.2+ expects YAML (key: value)." >&2
+fi

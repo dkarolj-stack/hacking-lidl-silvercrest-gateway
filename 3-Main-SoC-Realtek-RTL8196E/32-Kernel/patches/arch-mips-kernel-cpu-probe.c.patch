@@ -1,0 +1,29 @@
+--- a/arch/mips/kernel/cpu-probe.c
++++ b/arch/mips/kernel/cpu-probe.c
+@@ -1350,7 +1350,26 @@
+ 			__cpu_name[cpu] = "Loongson 1B";
+ 			break;
+ 		}
++		break;
++ 
++	case PRID_IMP_LX4380:
++		/* Lexra/RLX Processors */
++		c->options = MIPS_CPU_TLB | MIPS_CPU_3K_CACHE | MIPS_CPU_NOFPUEX;
++		c->ases = MIPS_ASE_MIPS16;
++		c->tlbsize = 32;
++		c->cputype = CPU_RLX4181;
++		__cpu_name[cpu] = "Lexra LX4380 / RLX4181";
+ 
++		pr_info("RLX4181 detected: options=0x%08llx, ases=0x%08lx\n",
++			c->options, c->ases);
++		pr_info("RLX4181 features: cpu_has_llsc=%llu, cpu_has_fpu=%llu\n",
++			(unsigned long long)cpu_has_llsc, (unsigned long long)cpu_has_fpu);
++ 
++		/* Initialize RLX-specific cache operations */
++		{
++			extern void lexra_cache_init(void);
++			lexra_cache_init();
++		}
+ 		break;
+ 	}
+ }

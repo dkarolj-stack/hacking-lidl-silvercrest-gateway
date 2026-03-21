@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: GPL-2.0
+if REALTEK
+
+choice
+	prompt "Realtek SoC selection"
+	default SOC_RTL8196E
+	help
+	  Select Realtek SoC type.
+
+	config SOC_RTL8196E
+		bool "RTL8196E"
+		select USE_GENERIC_EARLY_PRINTK_8250
+		select SYS_SUPPORTS_BIG_ENDIAN
+		select SYS_HAS_CPU_RLX4181
+		select HW_HAS_PCI
+		select GPIOLIB
+		select GPIO_GENERIC
+		select GPIOLIB_IRQCHIP
+		select RTL819X_INTC
+		select CLKSRC_RTL819X
+
+endchoice
+
+choice
+	prompt "Devicetree selection"
+	default DTB_RTK_NONE
+	help
+	  Select the devicetree.
+
+	config DTB_RTK_NONE
+		bool "None"
+
+	config DTB_RTL8196E_GEN
+		bool "RTL8196E Lidl Gateway"
+		depends on SOC_RTL8196E
+		select BUILTIN_DTB
+
+endchoice
+
+endif

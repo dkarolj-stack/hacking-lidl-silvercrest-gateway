@@ -1,0 +1,11 @@
+export PS1='~ # '
+# Set this to 0 for silent boot
+INIT_VERBOSE=0
+export INIT_VERBOSE
+
+# Terminal configuration - users can add terminfo files to /userdata/usr/share/terminfo/
+export TERMINFO=/userdata/usr/share/terminfo
+[ -z "$TERM" ] && export TERM=linux
+
+# Auto-detect terminal size
+eval $(resize) 2>/dev/null

@@ -1,0 +1,13 @@
+--- a/arch/mips/include/asm/cpu-type.h
++++ b/arch/mips/include/asm/cpu-type.h
+@@ -111,6 +111,10 @@
+ 	case CPU_TX3927:
+ #endif
+ 
++#ifdef CONFIG_SYS_HAS_CPU_RLX4181
++	case CPU_RLX4181:
++#endif
++
+ #ifdef CONFIG_SYS_HAS_CPU_VR41XX
+ 	case CPU_VR41XX:
+ 	case CPU_VR4111:

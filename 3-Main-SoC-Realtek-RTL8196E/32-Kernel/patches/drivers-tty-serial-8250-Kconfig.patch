@@ -1,0 +1,28 @@
+--- a/drivers/tty/serial/8250/Kconfig
++++ b/drivers/tty/serial/8250/Kconfig
+@@ -512,6 +512,25 @@
+ 	  Select this option if you have machine with an NVIDIA Tegra SoC and
+ 	  wish to enable 8250 serial driver for the Tegra serial interfaces.
+ 
++config SERIAL_8250_RTL819X
++	tristate "Realtek RTL819X UART support"
++	depends on SERIAL_8250
++	depends on OF_FLATTREE
++	depends on MACH_REALTEK || MIPS || COMPILE_TEST
++	help
++	  This driver provides support for the UART controller found on
++	  Realtek RTL8196E SoCs. It handles the SoC-specific hardware flow
++	  control register that must be configured for proper RTS/CTS
++	  operation.
++
++	  This is particularly important when interfacing with devices like
++	  the EFR32 Zigbee module that require strict hardware flow control.
++
++	  If you have a system using an RTL8196E SoC and wish to enable
++	  hardware flow control on UART1, say Y to this option.
++
++	  If unsure, say N.
++
+ config SERIAL_OF_PLATFORM
+ 	tristate "Devicetree based probing for 8250 ports"
+ 	depends on SERIAL_8250 && OF

@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+instance="${CPC_INSTANCE_NAME:-cpcd_bringup}"
+socket_dir="${CPC_SOCKET_DIR:-/dev/shm/cpcd/$instance}"
+expected="${CPCD_READY_SOCKET:-}"
+timeout="${READY_TIMEOUT:-20}"
+interval="${READY_POLL_INTERVAL:-0.2}"
+
+if [ -n "$expected" ] && [[ "$expected" != /* ]]; then
+  expected="$socket_dir/$expected"
+fi
+
+SECONDS=0
+while (( SECONDS < timeout )); do
+  if [ -n "$expected" ]; then
+    if [ -S "$expected" ]; then
+      exit 0
+    fi
+  else
+    if [ -d "$socket_dir" ]; then
+      if find "$socket_dir" -maxdepth 1 -type s -print -quit | grep -q .; then
+        exit 0
+      fi
+    fi
+  fi
+  sleep "$interval"
+done
+
+if find /dev/shm -maxdepth 1 -type s -name "*cpcd*.sock" -print -quit | grep -q .; then
+  echo "Hint: CPC sockets exist in /dev/shm; check socket_folder in cpcd.conf or CPC_SOCKET_DIR." >&2
+fi
+
+echo "Timed out waiting for CPCD sockets in $socket_dir" >&2
+exit 1

@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+unit="${1:-}"
+timeout="${READY_TIMEOUT:-20}"
+interval="${READY_POLL_INTERVAL:-0.2}"
+
+if [ -z "$unit" ]; then
+  echo "usage: rcp-wait-active UNIT" >&2
+  exit 2
+fi
+
+SECONDS=0
+while (( SECONDS < timeout )); do
+  if systemctl --user --quiet is-active "$unit"; then
+    exit 0
+  fi
+  sleep "$interval"
+done
+
+echo "Timed out waiting for unit to become active: $unit" >&2
+systemctl --user --no-pager status "$unit" >&2 || true
+exit 1

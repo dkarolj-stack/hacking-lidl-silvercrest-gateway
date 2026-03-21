@@ -1,0 +1,30 @@
+#!/bin/sh
+#
+# S05syslog - Start/stop minimal syslogd and klogd (BusyBox)
+#
+# Provides system logging services via BusyBox syslogd/klogd
+# Can be disabled by creating /etc/nosyslog file
+#
+# Author: J. Nilo - May 2025
+#
+
+[ "$INIT_VERBOSE" = "0" ] && exec >/dev/null
+
+# Check if /etc/nosyslog file exists
+if [ -f /etc/nosyslog ]; then
+    echo "📝 Skipping syslogd & klogd"
+    exit 0
+fi
+
+case "$1" in
+start)
+    echo "📝 Starting syslogd and klogd"
+    syslogd -O /var/log/messages -s 32 -b 2 -m 0
+    klogd &
+    ;;
+stop)
+    echo "📝 Stopping syslogd and klogd"
+    killall syslogd
+    killall klogd
+    ;;
+esac

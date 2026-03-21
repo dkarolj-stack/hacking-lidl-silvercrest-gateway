@@ -1,0 +1,328 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/rcp-stack"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/rcp-stack"
+BIN_DIR="$CONFIG_DIR/bin"
+ENV_FILE="$CONFIG_DIR/rcp-stack.env"
+UNIT_DIR="$ROOT/systemd/user"
+
+UNITS=(
+  socat-cpc-rcp.service
+  cpcd-bringup.service
+  zigbeed.service
+  socat-zigbeed-pty.service
+  zigbee2mqtt.service
+)
+
+log() {
+  printf '%s\n' "$*" >&2
+}
+
+die() {
+  log "error: $*"
+  exit 1
+}
+
+load_env() {
+  if [ -f "$ENV_FILE" ]; then
+    set -a
+    # shellcheck disable=SC1090
+    . "$ENV_FILE"
+    set +a
+  fi
+}
+
+open_editor() {
+    local file="$1"
+    if [ -n "${EDITOR:-}" ]; then
+        $EDITOR "$file"
+    elif command -v nano >/dev/null 2>&1; then
+        nano "$file"
+    elif command -v vi >/dev/null 2>&1; then
+        vi "$file"
+    else
+        log "No editor found"
+        return 1
+    fi
+}
+
+set_defaults() {
+  CPC_INSTANCE_NAME="${CPC_INSTANCE_NAME:-cpcd_bringup}"
+  CPC_SOCKET_DIR="${CPC_SOCKET_DIR:-/dev/shm/cpcd/$CPC_INSTANCE_NAME}"
+  CPC_RCP_PTY="${CPC_RCP_PTY:-/tmp/ttyCpcRcp}"
+  ZIGBEED_PTY="${ZIGBEED_PTY:-/tmp/ttyZigbeed}"
+  Z2M_PTY="${Z2M_PTY:-/tmp/ttyZ2M}"
+  CPCD_CONF="${CPCD_CONF:-$HOME/.config/rcp-stack/cpcd.conf}"
+  READY_TIMEOUT="${READY_TIMEOUT:-20}"
+  READY_POLL_INTERVAL="${READY_POLL_INTERVAL:-0.2}"
+  export CPC_INSTANCE_NAME CPC_SOCKET_DIR CPC_RCP_PTY ZIGBEED_PTY Z2M_PTY
+  export CPCD_CONF READY_TIMEOUT READY_POLL_INTERVAL
+}
+
+ensure_env() {
+  mkdir -p "$CONFIG_DIR" "$STATE_DIR"
+  if [ ! -s "$ENV_FILE" ]; then
+    set_defaults
+    cat >"$ENV_FILE" <<EOF
+# rcp-stack configuration
+#
+# Required: virtual RCP endpoint (TCP) exposed by serialgateway
+# RCP_ENDPOINT=tcp://ip_adress:8888
+#
+# Required: command lines. Use the helper vars provided by the units:
+# - \$CPC_INSTANCE_NAME (defaults to cpcd_bringup)
+# - \$CPC_SOCKET_DIR (defaults to /dev/shm/cpcd/\$CPC_INSTANCE_NAME)
+# - \$CPCD_CONF (defaults to \$HOME/.config/rcp-stack/cpcd.conf)
+# - \$CPC_RCP_PTY (defaults to /tmp/ttyCpcRcp)
+# - \$ZIGBEED_PTY (defaults to /tmp/ttyZigbeed)
+# - \$Z2M_PTY (defaults to /tmp/ttyZ2M)
+#
+# CPCD_COMMAND='cpcd -c "$HOME/.config/rcp-stack/cpcd.conf"'
+# ZIGBEED_COMMAND='zigbeed -r "spinel+cpc://$CPC_INSTANCE_NAME?iid=1&iid-list=0" -p "$ZIGBEED_PTY" -d 5 -v 1'
+# Z2M_COMMAND=zigbee2mqtt
+#
+# Optional:
+# CPC_INSTANCE_NAME=cpcd_bringup
+# CPC_SOCKET_DIR=/dev/shm/cpcd/cpcd_bringup
+# CPCD_CONF=$HOME/.config/rcp-stack/cpcd.conf
+# CPC_TRACES_DIR=/run/user/$UID/rcp-stack/traces
+# CPCD_READY_SOCKET=ctrl.cpcd.sock
+# CPCD_READY_SOCKET=cpcd.sock
+# READY_TIMEOUT=20
+# READY_POLL_INTERVAL=0.2
+EOF
+    echo "The configuration file '$ENV_FILE' was created."
+    read -p "Would you like to edit it now? (y/n): " choice
+    case "$choice" in
+      [yY][eE][sS]|[yY])
+        if ! open_editor "$ENV_FILE"; then
+          die "Failed to open editor. Please edit $ENV_FILE manually, then rerun."
+        fi
+        ;;
+      *)
+        die "Created $ENV_FILE. Edit it with your paths, then rerun."
+        ;;
+    esac
+  fi
+}
+
+ensure_cpcd_conf() {
+  if [ ! -s "$CPCD_CONF" ]; then
+    log "Generating $CPCD_CONF..."
+    cat >"$CPCD_CONF" <<EOF
+instance_name: ${CPC_INSTANCE_NAME:-cpcd_bringup}
+bus_type: UART
+uart_device_file: ${CPC_RCP_PTY:-/tmp/ttyCpcRcp}
+uart_device_baud: 115200
+uart_hardflow: true
+disable_encryption: true
+binding_key_file: $HOME/.cpcd/binding.key
+stdout_trace: false
+trace_to_file: false
+traces_folder: /run/user/$UID/rcp-stack/traces
+socket_folder: /dev/shm/cpcd/${CPC_INSTANCE_NAME:-cpcd_bringup}
+EOF
+    log "Edit if needed (binding_key_file, etc.)"
+  fi
+}
+
+sync_scripts() {
+  mkdir -p "$BIN_DIR"
+  for script in "$ROOT"/scripts/*; do
+    [ -f "$script" ] || continue
+    install -m 0755 "$script" "$BIN_DIR/$(basename "$script")"
+  done
+}
+
+link_units() {
+  local user_unit_dir
+  user_unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+  mkdir -p "$user_unit_dir"
+  [ -d "$UNIT_DIR" ] || die "missing unit directory: $UNIT_DIR"
+  for unit in "${UNITS[@]}"; do
+    local src="$UNIT_DIR/$unit"
+    local dest="$user_unit_dir/$unit"
+    if [ -e "$dest" ] && [ ! -L "$dest" ]; then
+      mv "$dest" "$dest.bak.$(date +%s)"
+    fi
+    ln -sf "$src" "$dest"
+  done
+  systemctl --user daemon-reload >/dev/null
+}
+
+require_vars() {
+  for var_name in "$@"; do
+    if [ -z "${!var_name:-}" ]; then
+      die "$var_name is not set in $ENV_FILE"
+    fi
+  done
+}
+
+cmd_up() {
+  ensure_env
+  sync_scripts
+  link_units
+  load_env
+  set_defaults
+  ensure_cpcd_conf
+
+  require_vars RCP_ENDPOINT CPCD_COMMAND ZIGBEED_COMMAND
+
+  "$BIN_DIR/rcp-check-endpoint"
+  "$BIN_DIR/rcp-check-cpcd-conf"
+  "$BIN_DIR/rcp-check-zigbeed-conf"
+
+  systemctl --user start socat-cpc-rcp.service
+  "$BIN_DIR/rcp-wait-pty" "$CPC_RCP_PTY"
+
+  systemctl --user start cpcd-bringup.service
+  "$BIN_DIR/rcp-wait-cpcd"
+
+  systemctl --user start socat-zigbeed-pty.service
+  "$BIN_DIR/rcp-wait-pty" "$ZIGBEED_PTY"
+  "$BIN_DIR/rcp-wait-pty" "$Z2M_PTY"
+
+  systemctl --user start zigbeed.service
+  "$BIN_DIR/rcp-wait-active" zigbeed.service
+
+  if [ -n "${Z2M_COMMAND:-}" ]; then
+    systemctl --user start zigbee2mqtt.service
+    "$BIN_DIR/rcp-wait-active" zigbee2mqtt.service || true
+  else
+    log "Z2M_COMMAND not set; skipping zigbee2mqtt.service"
+  fi
+}
+
+cmd_down() {
+  load_env
+  sync_scripts
+  set_defaults
+
+  systemctl --user stop zigbee2mqtt.service zigbeed.service socat-zigbeed-pty.service cpcd-bringup.service socat-cpc-rcp.service 2>/dev/null || true
+
+  "$BIN_DIR/rcp-cleanup" --all --socket-dir "$CPC_SOCKET_DIR"
+}
+
+cmd_status() {
+  load_env
+  set_defaults
+  log "Units:"
+  systemctl --user --no-pager status "${UNITS[@]}" 2>/dev/null || true
+  log ""
+  log "Symlinks:"
+  ls -l /tmp/ttyCpcRcp /tmp/ttyZigbeed /tmp/ttyZ2M 2>/dev/null || true
+  log ""
+  log "CPC sockets:"
+  ls -l "$CPC_SOCKET_DIR" 2>/dev/null || true
+}
+
+cmd_doctor() {
+  load_env
+  set_defaults
+  CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/rcp-stack"
+  STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/rcp-stack"
+  KEY_DIR="${CPCD_KEY_DIR:-$HOME/.cpcd}"
+  ZIGBEED_STATE_DIR="${STATE_DIR}/zigbeed"
+  ZIGBEED_TOKEN_FILE="${ZIGBEED_STATE_DIR}/host_token.nvm"
+  LEGACY_TOKEN_FILE="${HOME}/host_token.nvm"
+
+  log "rcp-stack doctor"
+  log "user: $(id -un) uid: $(id -u)"
+  log "config: $CONFIG_DIR"
+  log "state: $STATE_DIR"
+  log "keys: $KEY_DIR"
+  log "runtime: ${XDG_RUNTIME_DIR:-/run/user/$UID}"
+  log ""
+
+  log "Filesystem state:"
+  ls -ld "$CONFIG_DIR" "$STATE_DIR" "$KEY_DIR" "$CPC_SOCKET_DIR" 2>/dev/null || true
+  ls -l /tmp/ttyCpcRcp /tmp/ttyZigbeed /tmp/ttyZ2M 2>/dev/null || true
+  log ""
+
+  if [ -d "$CPC_SOCKET_DIR" ]; then
+    if find "$CPC_SOCKET_DIR" -maxdepth 1 -type s -print -quit | grep -q .; then
+      log "CPC sockets: present"
+    else
+      log "CPC sockets: none"
+    fi
+  fi
+
+  if [ -z "${RCP_ENDPOINT:-}" ]; then
+    log "warn: RCP_ENDPOINT is not set in $ENV_FILE"
+  fi
+
+  if [ -e /usr/local/etc/zigbeed.conf ]; then
+    log "zigbeed.conf: /usr/local/etc/zigbeed.conf"
+    "$BIN_DIR/rcp-check-zigbeed-conf" || true
+  fi
+
+  "$BIN_DIR/rcp-check-cpcd-conf" || true
+
+  if [ -e "$LEGACY_TOKEN_FILE" ]; then
+    log "warn: legacy zigbeed token file found: $LEGACY_TOKEN_FILE"
+    log "warn: zigbeed now uses: $ZIGBEED_TOKEN_FILE"
+  fi
+
+  if [ -e "$ZIGBEED_TOKEN_FILE" ]; then
+    token_ver="$(dd if="$ZIGBEED_TOKEN_FILE" bs=1 count=1 2>/dev/null | od -An -t u1 | tr -d ' ')"
+    if [ -n "$token_ver" ] && [ "$token_ver" = "1" ]; then
+      log "warn: zigbeed token file is v1; 8.2+ requires v2 ($ZIGBEED_TOKEN_FILE)"
+    fi
+  fi
+
+  local dirs=()
+  [ -d "$CONFIG_DIR" ] && dirs+=("$CONFIG_DIR")
+  [ -d "$STATE_DIR" ] && dirs+=("$STATE_DIR")
+  [ -d "$KEY_DIR" ] && dirs+=("$KEY_DIR")
+  if [ ${#dirs[@]} -gt 0 ]; then
+    if find "${dirs[@]}" -not -user "$(id -un)" -print -quit | grep -q .; then
+      log "warn: root-owned artifacts detected in config/state/key dirs"
+    fi
+  fi
+
+  log ""
+  log "Service status:"
+  for unit in "${UNITS[@]}"; do
+    systemctl --user --no-pager status "$unit" 2>/dev/null || true
+  done
+
+  log ""
+  log "Recent journals:"
+  for unit in "${UNITS[@]}"; do
+    log "---- $unit ----"
+    journalctl --user -u "$unit" -n 200 --no-pager 2>/dev/null || true
+  done
+}
+
+usage() {
+  cat <<EOF
+usage: rcp-stack <command>
+
+commands:
+  up       start services and wait for readiness gates
+  down     stop services and cleanup symlinks/sockets
+  status   show services and filesystem state
+  doctor   collect diagnostics and logs
+EOF
+}
+
+case "${1:-}" in
+  up)
+    cmd_up
+    ;;
+  down)
+    cmd_down
+    ;;
+  status)
+    cmd_status
+    ;;
+  doctor)
+    cmd_doctor
+    ;;
+  *)
+    usage
+    exit 1
+    ;;
+esac

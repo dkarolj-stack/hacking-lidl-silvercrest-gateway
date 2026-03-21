@@ -1,0 +1,181 @@
+# Silicon Labs Project Configuration Tools: slcp, v0, Component selection file.
+project_name: z3-router
+label: Zigbee 3.0 Router (Lidl Silvercrest Gateway)
+author: Custom
+description: Minimal Zigbee 3.0 Router firmware for EFR32MG1B232F256GM48 (256KB Flash).
+  Extends Zigbee mesh network by routing messages between devices.
+  Optimized for flash size - no CLI, no debug, no unused clusters.
+category: Zigbee Application
+filter:
+- name: Device Type
+  value: [SoC]
+- name: Project Difficulty
+  value: [Advanced]
+- name: Wireless Technology
+  value: [Zigbee]
+package: Zigbee
+quality: production
+
+source:
+- {path: main.c}
+- {path: app.c}
+
+config_file:
+- path: config/zcl/zcl_config.zap
+  file_id: zap_configuration_file_id
+  directory: zcl
+
+include:
+- path: ./
+
+component:
+# ============================================================
+# Hardware / Target
+# ============================================================
+- {id: EFR32MG1B232F256GM48}
+
+# ============================================================
+# UART communication (for debug/future host commands)
+# ============================================================
+- instance: [vcom]
+  id: iostream_usart
+
+# ============================================================
+# Core Infrastructure
+# ============================================================
+# Token/NVM storage
+- {id: token_manager}
+
+# Microsecond delay (for boot delay on RTL8196E)
+- {id: udelay}
+
+# ============================================================
+# Zigbee Stack
+# ============================================================
+# Application framework
+- {id: zigbee_app_framework_common}
+
+# Zigbee PRO stack (full mesh routing)
+- {id: zigbee_pro_stack}
+
+# Zigbee R22 support (compatibility)
+- {id: zigbee_r22_support}
+
+# Security
+- {id: zigbee_security_link_keys}
+
+# Source routing for large networks
+- {id: zigbee_source_route}
+
+# ============================================================
+# ZCL Framework and Clusters
+# ============================================================
+# ZCL core framework
+- {id: zigbee_zcl_framework_core}
+
+# Basic cluster (mandatory for all devices)
+- {id: zigbee_basic}
+
+# NOTE: zigbee_identify removed - requires ZAP command parser which needs
+# ZAP tool to generate. Basic cluster is sufficient for a minimal router.
+
+# ============================================================
+# Network Management
+# ============================================================
+# Network steering (join existing network)
+- {id: zigbee_network_steering}
+
+# Scan dispatch (channel scanning)
+- {id: zigbee_scan_dispatch}
+
+# Trust center link key update
+- {id: zigbee_update_tc_link_key}
+
+# NOTE: zigbee_find_and_bind_target removed - depends on Identify cluster
+
+# Network counters (diagnostics)
+- {id: zigbee_counters}
+
+# Application bootloader (required for GBL creation)
+- {id: zigbee_application_bootloader}
+
+# ============================================================
+# NOTE: Excluded components (flash savings ~150KB)
+# ============================================================
+# - zigbee_gp, zigbee_green_power_* (Green Power ~50KB)
+# - zigbee_zll, zigbee_zll_* (Zigbee Light Link ~40KB)
+# - zigbee_color_control_server (~15KB)
+# - zigbee_level_control (~8KB)
+# - zigbee_scenes (~10KB)
+# - zigbee_groups_server (~4KB)
+# - zigbee_reporting (~5KB)
+# - zigbee_debug_print (~10KB)
+# - zigbee_network_creator* (coordinator only)
+# - simple_led, simple_button (no GPIO on this board)
+
+define:
+# MAC filter table size
+- {name: EMBER_CUSTOM_MAC_FILTER_TABLE_SIZE, value: '15'}
+
+configuration:
+# ============================================================
+# Device Type Configuration
+# ============================================================
+- {name: SLI_ZIGBEE_PRIMARY_NETWORK_DEVICE_TYPE, value: SLI_ZIGBEE_NETWORK_DEVICE_TYPE_ROUTER}
+- {name: SLI_ZIGBEE_PRIMARY_NETWORK_SECURITY_TYPE, value: SLI_ZIGBEE_NETWORK_SECURITY_TYPE_3_0}
+
+# ============================================================
+# UART Configuration
+# ============================================================
+- {name: SL_BOARD_ENABLE_VCOM, value: '1'}
+- {name: SL_IOSTREAM_USART_VCOM_FLOW_CONTROL_TYPE, value: usartHwFlowControlCtsAndRts}
+- {name: SL_IOSTREAM_USART_VCOM_RX_BUFFER_SIZE, value: '256'}
+- {name: SL_IOSTREAM_USART_VCOM_TX_BUFFER_SIZE, value: '256'}
+
+# ============================================================
+# Network Parameters - Moderate for Router
+# ============================================================
+
+# Child table - sleepy end devices this router can support
+- {name: EMBER_MAX_END_DEVICE_CHILDREN, value: '16'}
+- {name: EMBER_AF_PLUGIN_ZIGBEE_PRO_STACK_CHILD_TABLE_SIZE, value: '16'}
+
+# Packet buffers - message buffer pool
+- {name: EMBER_PACKET_BUFFER_COUNT, value: '64'}
+
+# Binding table - direct device bindings
+- {name: EMBER_BINDING_TABLE_SIZE, value: '10'}
+
+# Security key table
+- {name: EMBER_KEY_TABLE_SIZE, value: '4'}
+
+# Neighbor table - direct radio neighbors
+- {name: EMBER_NEIGHBOR_TABLE_SIZE, value: '16'}
+
+# Broadcast table
+- {name: EMBER_BROADCAST_TABLE_SIZE, value: '15'}
+
+# APS unicast message queue
+- {name: EMBER_APS_UNICAST_MESSAGE_COUNT, value: '10'}
+
+# Source route table - for network routing
+- {name: EMBER_SOURCE_ROUTE_TABLE_SIZE, value: '50'}
+
+# ============================================================
+# NVM3 - Token Storage
+# ============================================================
+- condition: [device_series_1]
+  name: NVM3_DEFAULT_NVM_SIZE
+  value: '36864'
+- condition: [device_series_2]
+  name: NVM3_DEFAULT_NVM_SIZE
+  value: '32768'
+
+# Disable unused PSA drivers
+- {name: SL_PSA_ITS_SUPPORT_V1_DRIVER, value: '0'}
+- {name: SL_PSA_ITS_SUPPORT_V2_DRIVER, value: '0'}
+- {name: SL_PSA_ITS_SUPPORT_V3_DRIVER, value: '1'}
+
+ui_hints:
+  highlight:
+  - {path: ''}

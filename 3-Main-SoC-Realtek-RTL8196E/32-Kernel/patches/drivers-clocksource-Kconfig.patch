@@ -1,0 +1,27 @@
+--- a/drivers/clocksource/Kconfig
++++ b/drivers/clocksource/Kconfig
+@@ -554,7 +554,7 @@
+ 	  This enables build of a clocksource and clockevent driver for
+ 	  the 48-bit System Timer (STI) hardware available on a SoCs
+ 	  such as EMEV2 from former NEC Electronics.
+-
++	  
+ config CLKSRC_QCOM
+ 	bool "Qualcomm MSM timer" if COMPILE_TEST
+ 	depends on ARM
+@@ -579,6 +579,15 @@
+ 	select CLOCKSOURCE_WATCHDOG
+ 	select TIMER_OF
+ 
++config CLKSRC_RTL819X
++	bool "Realtek RTL819x Timer"
++	depends on MIPS || COMPILE_TEST
++	select TIMER_OF
++	help
++	  This enables support for the clocksource and clockevent device
++	  on Realtek RTL819x SoCs (RTL8196E, RTL8197D, etc.). The hardware
++	  provides two 28-bit timers for system timekeeping.
++
+ config CLKSRC_TANGO_XTAL
+ 	bool "Clocksource for Tango SoC" if COMPILE_TEST
+ 	depends on ARM

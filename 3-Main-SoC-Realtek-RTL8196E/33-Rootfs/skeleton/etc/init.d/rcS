@@ -1,0 +1,79 @@
+#!/bin/sh
+#
+# rcS - Bootstrap script for squashfs rootfs
+#
+# This minimal script in the read-only squashfs:
+# 1. Mounts essential filesystems (proc, sys, var)
+# 2. Creates MTD device nodes if needed
+# 3. Mounts /userdata JFFS2 partition
+# 4. Executes init scripts from /userdata/etc/init.d/
+#
+# J. Nilo - December 2025
+#
+
+echo ""
+echo "===== System Bootstrap ====="
+
+# Mount essential filesystems
+echo "Mounting filesystems..."
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t ramfs ramfs /var
+
+# Mount devpts for pseudo-terminals (required for SSH/dropbear)
+mkdir -p /dev/pts
+mount -t devpts devpts /dev/pts
+
+# Create /var subdirectories
+mkdir -p /var/tmp /var/log /var/run /var/lock
+
+# MTD devices - create only if missing
+if [ ! -e /dev/mtd0 ]; then
+    echo "Creating MTD device nodes..."
+    for i in 0 1 2 3; do
+        mknod /dev/mtd${i} c 90 $((i * 2)) 2>/dev/null || true
+        mknod /dev/mtd${i}ro c 90 $((i * 2 + 1)) 2>/dev/null || true
+    done
+fi
+
+if [ ! -e /dev/mtdblock0 ]; then
+    for i in 0 1 2 3; do
+        mknod /dev/mtdblock${i} b 31 ${i} 2>/dev/null || true
+    done
+fi
+
+# Adjust device permissions
+chmod 666 /dev/ttyS0 /dev/ttyS1 2>/dev/null || true
+
+# Serial port configuration
+stty -F /dev/ttyS1 115200 -echo 2>/dev/null || true
+
+# Mount JFFS2 userdata partition (mountpoint exists in squashfs)
+echo "Mounting /userdata (JFFS2)..."
+
+if mount -t jffs2 /dev/mtdblock3 /userdata 2>/dev/null; then
+    echo "/userdata mounted successfully"
+elif flash_eraseall /dev/mtd3 2>/dev/null && mount -t jffs2 /dev/mtdblock3 /userdata 2>/dev/null; then
+    echo "/userdata initialized and mounted"
+else
+    echo "ERROR: Failed to mount /userdata"
+    echo "System may not function correctly!"
+fi
+
+# Execute user init scripts from /userdata
+if [ -d /userdata/etc/init.d ]; then
+    echo ""
+    echo "===== Launching userdata init scripts ====="
+    for i in /userdata/etc/init.d/S??*; do
+        if [ -x "$i" ]; then
+            echo "Starting $i"
+            "$i" start
+        fi
+    done
+    echo "Userdata init completed"
+else
+    echo "WARNING: /userdata/etc/init.d not found"
+fi
+
+echo ""
+echo "===== System ready ====="

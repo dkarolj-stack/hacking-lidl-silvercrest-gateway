@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+endpoint="${RCP_ENDPOINT:-}"
+timeout="${RCP_ENDPOINT_TIMEOUT:-5}"
+
+if [ -z "$endpoint" ]; then
+  echo "RCP_ENDPOINT is not set (expected tcp://host:port or host:port)" >&2
+  exit 1
+fi
+
+# Normalize endpoint format: strip tcp://, TCP:, etc.
+normalized="$endpoint"
+normalized="${normalized#[Tt][Cc][Pp]://}"
+normalized="${normalized#[Tt][Cc][Pp]:}"
+normalized="${normalized#//}"
+
+# Validate format
+if ! [[ "$normalized" =~ ^\[[^]]+\]:[0-9]+$ ]] && ! [[ "$normalized" =~ ^[^:]+:[0-9]+$ ]]; then
+  echo "RCP_ENDPOINT format invalid: $endpoint" >&2
+  echo "Expected tcp://host:port, host:port, or TCP:host:port" >&2
+  exit 1
+fi
+
+# Extract host and port
+if [[ "$normalized" =~ ^\[([^]]+)\]:([0-9]+)$ ]]; then
+  host="${BASH_REMATCH[1]}"
+  port="${BASH_REMATCH[2]}"
+else
+  host="${normalized%:*}"
+  port="${normalized##*:}"
+fi
+
+# Test TCP connectivity
+echo "Checking RCP endpoint: $host:$port ..." >&2
+if command -v nc >/dev/null 2>&1; then
+  if ! nc -z -w "$timeout" "$host" "$port" 2>/dev/null; then
+    echo "error: Cannot connect to RCP endpoint $host:$port (timeout ${timeout}s)" >&2
+    echo "Is the gateway powered on and serialgateway running?" >&2
+    exit 1
+  fi
+elif [ -e /dev/tcp ]; then
+  if ! timeout "$timeout" bash -c "echo >/dev/tcp/$host/$port" 2>/dev/null; then
+    echo "error: Cannot connect to RCP endpoint $host:$port (timeout ${timeout}s)" >&2
+    echo "Is the gateway powered on and serialgateway running?" >&2
+    exit 1
+  fi
+else
+  echo "warn: nc not found, skipping connectivity check" >&2
+  exit 0
+fi
+
+echo "RCP endpoint $host:$port is reachable" >&2

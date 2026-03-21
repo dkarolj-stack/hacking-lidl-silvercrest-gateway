@@ -1,0 +1,12 @@
+--- a/arch/mips/include/asm/mipsregs.h
++++ b/arch/mips/include/asm/mipsregs.h
+@@ -19,6 +19,9 @@
+ #include <asm/isa-rev.h>
+ #include <asm/war.h>
+ 
++#if defined(CONFIG_CPU_RLX4181)
++#include <asm/mach-realtek/lxregs.h>
++#endif
+ /*
+  * The following macros are especially useful for __asm__
+  * inline assembler.

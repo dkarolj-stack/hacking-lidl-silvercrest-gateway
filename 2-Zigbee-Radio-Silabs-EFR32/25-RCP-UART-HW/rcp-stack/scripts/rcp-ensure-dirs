@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/rcp-stack"
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/rcp-stack"
+zigbeed_state_dir="$state_dir/zigbeed"
+key_dir="${CPCD_KEY_DIR:-$HOME/.cpcd}"
+runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$UID}"
+instance="${CPC_INSTANCE_NAME:-cpcd_bringup}"
+socket_dir="${CPC_SOCKET_DIR:-/dev/shm/cpcd/$instance}"
+traces_dir="${CPC_TRACES_DIR:-}"
+
+if [[ "$socket_dir" != "$runtime_dir/"* ]] && [[ "$socket_dir" != /dev/shm/* ]]; then
+  echo "CPC_SOCKET_DIR must be under $runtime_dir or /dev/shm (got $socket_dir)" >&2
+  exit 1
+fi
+
+install -d -m 0700 "$config_dir" "$state_dir" "$zigbeed_state_dir" "$key_dir"
+install -d -m 0700 "$(dirname "$socket_dir")" "$socket_dir"
+if [ -n "$traces_dir" ]; then
+  install -d -m 0700 "$traces_dir"
+fi

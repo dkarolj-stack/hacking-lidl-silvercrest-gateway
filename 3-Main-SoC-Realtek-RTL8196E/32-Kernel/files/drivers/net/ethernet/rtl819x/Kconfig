@@ -1,0 +1,22 @@
+#
+# Realtek RTL819x Ethernet driver configuration
+#
+
+config RTL819X
+	tristate "Realtek RTL819x Ethernet support"
+	depends on REALTEK || COMPILE_TEST
+	select PHYLIB
+	select NET_CORE
+	help
+	  This driver supports the integrated Ethernet controller found on
+	  Realtek RTL8196E and similar SoCs. This is a simplified single-port
+	  driver derived from the Linux 2.6.30 SDK driver.
+
+	  The driver supports:
+	  - Single physical Ethernet port (port 4)
+	  - Hardware checksum offload
+	  - VLAN support
+	  - Integrated 6-port switch
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called rtl819x.

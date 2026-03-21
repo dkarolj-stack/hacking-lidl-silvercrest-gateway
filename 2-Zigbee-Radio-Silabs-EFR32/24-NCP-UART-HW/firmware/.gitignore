@@ -1,0 +1,2 @@
+# Only keep .gbl files in firmware/
+*.tar

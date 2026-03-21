@@ -1,123 +1,164 @@
 # Hacking the Lidl Silvercrest Gateway
 
-## Overview
+> **If you find this project useful, please consider giving it a star!** It helps others discover it and motivates continued development.
+>
+> Questions? Use [Discussions](https://github.com/jnilo1/hacking-lidl-silvercrest-gateway/discussions). Found a bug? Open an [Issue](https://github.com/jnilo1/hacking-lidl-silvercrest-gateway/issues).
 
-The **Lidl Silvercrest Gateway** is a cheap and compact device originally
-designed to control Tuya/Zigbee smart devices via the Silvercrest
-ecosystem. Thanks to the pioneering work of
-[Paul Banks](https://paulbanks.org/projects/lidl-zigbee/#overview), this
-gateway can be repurposed into a fully open and customizable Zigbee
-coordinator.
+## What Is This?
 
-This repository expands on that work and documents how to:
+The **Lidl Silvercrest Zigbee Gateway** is an inexpensive device sold as part of a closed ecosystem. Out of the box, it only works with the Tuya cloud and the Silvercrest app.
 
-- Analyze the gateway's **hardware** and **firmware**,
-- Replace the original Tuya Zigbee stack with custom firmwares (NCP or
-  RCP),
-- Understand and modify the **embedded Linux system** based on the Realtek
-  SDK,
-- Interface the gateway with **open-source home automation platforms** such
-  as Home Assistant or Zigbee2MQTT.
+This project lets you **take full control** of this gateway:
+
+- **Use it with Home Assistant or Zigbee2MQTT** — No cloud, no app, fully local
+- **Modern system** — Linux 5.10 kernel with up-to-date tools
+- **Secure** — No Tuya cloud connection, SSH access only
+
+______________________________________________________________________
+
+## Quick Start
+
+### What You Need
+
+- A Lidl Silvercrest Zigbee Gateway
+- USB-to-serial adapter (3.3V UART)
+- Ethernet connection
+
+### Two Chips to Update
+
+The gateway contains **two independent processors**:
+
+| Chip | Role | What to flash |
+|------|------|---------------|
+| **Realtek RTL8196E** | Main Linux system | Kernel, rootfs, userdata |
+| **Silabs EFR32MG1B** | Zigbee radio | NCP firmware |
+
+### Choose Your Path
+
+| | Option 1: Flash Pre-built | Option 2: Build from Source |
+|---|---|---|
+| **For** | Most users | Developers / Hackers |
+| **Time** | ~30 minutes | ~2 hours |
+| **Requires** | Python 3, USB-serial adapter | Docker or Ubuntu 22.04 |
+| **Use case** | Just want a working local gateway | Customize kernel, rootfs, firmware |
+
+______________________________________________________________________
+
+## Option 1: Flash Pre-built Linux image & Zigbee Firmware
+
+**No build environment needed.** Just flash the pre-built images.
+
+### Step 1: Clone the Repository
+
+```bash
+git clone https://github.com/jnilo1/hacking-lidl-silvercrest-gateway.git
+cd hacking-lidl-silvercrest-gateway
+```
+
+### Step 2: Flash the Linux System (RTL8196E)
+
+Follow the migration guide: [35-Migration](./3-Main-SoC-Realtek-RTL8196E/35-Migration/)
+
+This flashes the pre-built kernel, rootfs, and userdata via TFTP.
+
+### Step 3: Update the Zigbee Firmware (EFR32MG1B)
+
+Use `universal-silabs-flasher` to update the Zigbee radio over the network:
+
+```bash
+pip install universal-silabs-flasher
+universal-silabs-flasher --device socket://<GATEWAY_IP>:8888 \
+    flash --firmware 2-Zigbee-Radio-Silabs-EFR32/24-NCP-UART-HW/firmware/ncp-uart-hw-7.5.1.gbl
+```
+
+See [22-Backup-Flash-Restore](./2-Zigbee-Radio-Silabs-EFR32/22-Backup-Flash-Restore/) for detailed instructions.
+
+### Step 4: Connect to Zigbee2MQTT
+
+```yaml
+serial:
+  port: tcp://<GATEWAY_IP>:8888
+```
+
+______________________________________________________________________
+
+## Option 2: Build from Source
+
+**For developers who want to customize the system.**
+
+### Step 1: Set Up the Build Environment
+
+Clone the repository:
+```bash
+git clone https://github.com/jnilo1/hacking-lidl-silvercrest-gateway.git
+cd hacking-lidl-silvercrest-gateway
+```
+
+Install the complete toolchain (see [1-Build-Environment](./1-Build-Environment/) for details):
+
+| Approach | Command | Time |
+|----------|---------|------|
+| **Ubuntu/WSL2** | `cd 1-Build-Environment && sudo ./install_deps.sh` | ~45 min |
+| **Docker** | `cd 1-Build-Environment && docker build -t lidl-gateway-builder .` | ~45 min |
+
+### Step 2: Build and Flash the Linux System
+
+```bash
+cd 3-Main-SoC-Realtek-RTL8196E
+./build_rtl8196e.sh    # Build kernel, rootfs, userdata
+./flash_rtl8196e.sh    # Flash via TFTP
+```
+
+### Step 3: Build and Flash the Zigbee Firmware
+
+```bash
+cd 2-Zigbee-Radio-Silabs-EFR32/24-NCP-UART-HW
+./build_ncp.sh         # Build NCP firmware
+# Then flash using universal-silabs-flasher (see Option 1, Step 3)
+```
+
+### Step 4: Connect to Zigbee2MQTT
+
+```yaml
+serial:
+  port: tcp://<GATEWAY_IP>:8888
+```
 
 ______________________________________________________________________
 
 ## Repository Structure
 
-```text
-.
-├── 0-Hardware/                      # Gateway hardware description and pinout
-│   └── README.md
-│
-├── 1-Firmwares/                    # Zigbee firmware build & flash tools
-│   ├── 10-EZSP-Reference/            # Introduction to EZSP & EmberZnet
-│   ├── 11-Simplicity-Studio/         # Building Zigbee firmwares with Simplicity Studio
-│   ├── 12-Backup-Restore-Flash/      # Flash dump and restore methods (SWD, ESP, etc.)
-│   ├── 13-Bootloader-UART-Xmodem/    # Using the Silabs/Gecko bootloader over UART
-│   ├── 14-NCP-UART-HW/               # Firmware: EZSP NCP (for Zigbee2MQTT, ZHA)
-│   └── 15-RCP-UART-HW/               # Firmware: multiprotocol RCP
-│
-├── 2-Softwares/                      # Embedded Linux software
-│   ├── 20-Backup-Restore             # Backup & Restore procedure of flash memory
-│   ├── 21-Linux-Kernel/              # Realtek SDK Linux kernel analysis
-│   ├── 22-Update the Root FileSystem # Ready to flash updated root filesystem
-│   ├── 23-Create the Root Filesystem # Create you own rootfs or compile your own programs
-│   └── 24-RCP-Daemons/               # CPC / Zigbeed daemons for RCP firmware
-│
-├── README.md                       # This file
-└── .github/
-    └── ISSUE_TEMPLATE/              # GitHub issue templates
-        ├── bug_report.md
-        └── feature_request.md
-```
+### [0-Hardware](./0-Hardware/)
 
-______________________________________________________________________
+Hardware documentation: pinouts, debug interfaces, chip specifications.
 
-## Goals
+### [1-Build-Environment](./1-Build-Environment/)
 
-This documentation is intended for tinkerers, hackers, and home automation
-enthusiasts who want to:
+Build environment with Docker or native Ubuntu 22.04/WSL2. Includes all required toolchains:
+- **Lexra MIPS** — for Main SoC (RTL8196E)
+- **ARM GCC + Silabs slc-cli** — for Zigbee Radio (EFR32)
 
-- Repurpose the Lidl Silvercrest Gateway as a **custom Zigbee
-  coordinator**,
-- Understand the **hardware and embedded software** used by the device,
-- Modify or replace the **Zigbee stack** and **embedded Linux firmware**,
-- **Integrate** the modified gateway into DIY home automation environments
-  (Home Assistant, Zigbee2MQTT, etc.).
+### [2-Zigbee-Radio-Silabs-EFR32](./2-Zigbee-Radio-Silabs-EFR32/)
 
-______________________________________________________________________
+Zigbee coprocessor (Silabs EFR32MG1B):
 
-## Community & Discussions
+- Backup and restore the original bootloader
+- Flash NCP firmware for Zigbee2MQTT/ZHA
 
-Got questions, stuck on something, or want to share your progress?\
-👉 Head over to the [**Discussions**](../../discussions) tab!
+### [3-Main-SoC-Realtek-RTL8196E](./3-Main-SoC-Realtek-RTL8196E/)
 
-Whether you're reverse engineering hardware, building Zigbee firmwares, or
-tweaking the Realtek SDK, you're welcome to:
+Main Linux system (Realtek RTL8196E):
 
-- Ask for help or get unblocked,
-- Share your work-in-progress or discoveries,
-- Suggest improvements or ideas for the project,
-- Help others with their setups or flash attempts.
-
-We’re building this together — jump in!
+- Linux 5.10 kernel
+- Root filesystem and user partition
+- Flash scripts and migration guide
 
 ______________________________________________________________________
 
 ## Credits
 
-This project builds upon the initial research by
-[Paul Banks](https://paulbanks.org/projects/lidl-zigbee/), whose work made
-this gateway hackable and to the unvaluable resources found around the Web.
-
-______________________________________________________________________
+This project builds upon the initial research by [Paul Banks](https://paulbanks.org/projects/lidl-zigbee/).
 
 ## License
 
-This project is open-source. See the [LICENSE](./LICENSE) file for details.
-
-## 📚 Table of Contents
-
-- [0-Hardware](./0-Hardware/README.md): Gateway hardware description and
-  pinout
-- [1-Firmwares](./1-Firmwares)
-  - [10-EZSP-Reference](./1-Firmwares/10-EZSP-Reference/README.md):
-    Introduction to EZSP & EmberZnet
-  - [11-Simplicity-Studio](./1-Firmwares/11-Simplicity-Studio/README.md):
-    Building Zigbee firmwares
-  - [12-Backup-Restore-Flash](./1-Firmwares/12-Backup-Restore-Flash/README.md):
-    Backup and restore methods
-  - [13-Bootloader-UART-Xmodem](./1-Firmwares/13-Bootloader-UART-Xmodem/README.md):
-    Bootloader via UART XMODEM
-  - [14-NCP-UART-HW](./1-Firmwares/14-NCP-UART-HW/README.md): EZSP-based
-    NCP firmware
-  - [15-RCP-UART-HW](./1-Firmwares/15-RCP-UART-HW/README.md): Multiprotocol
-    RCP firmware
-- [2-Softwares](./2-Softwares)
-  - [21-Linux-Kernel](./2-Softwares/21-Linux-Kernel/README.md): Kernel
-    analysis and toolchain issues
-  - [22-System-Tools](./2-Softwares/22-System-Tools/README.md): Precompiled
-    tools and toolchain (WIP)
-  - [23-RCP-Daemons](./2-Softwares/23-RCP-Daemons/README.md): CPC and
-    Zigbeed daemons
-- [.github/ISSUE_TEMPLATE](./.github/ISSUE_TEMPLATE): Issue and feature
-  request templates
+MIT License — See [LICENSE](./LICENSE) for details.

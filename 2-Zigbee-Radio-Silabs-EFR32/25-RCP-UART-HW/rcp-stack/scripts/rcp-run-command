@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+var_name="${1:-}"
+
+if [ -z "$var_name" ]; then
+  echo "usage: rcp-run-command ENV_VAR_NAME" >&2
+  exit 2
+fi
+
+cmd="${!var_name:-}"
+if [ -z "$cmd" ]; then
+  echo "Required command is not set: $var_name" >&2
+  exit 1
+fi
+
+exec /bin/sh -c "$cmd"

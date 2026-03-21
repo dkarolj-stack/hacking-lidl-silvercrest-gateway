@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+symlinks=()
+socket_dir=""
+
+usage() {
+  echo "usage: rcp-cleanup [--symlink PATH] [--socket-dir DIR] [--all]" >&2
+  exit 2
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --symlink)
+      [ $# -ge 2 ] || usage
+      symlinks+=("$2")
+      shift 2
+      ;;
+    --socket-dir)
+      [ $# -ge 2 ] || usage
+      socket_dir="$2"
+      shift 2
+      ;;
+    --all)
+      symlinks+=("/tmp/ttyCpcRcp" "/tmp/ttyZigbeed" "/tmp/ttyZ2M")
+      socket_dir="${socket_dir:-${CPC_SOCKET_DIR:-}}"
+      shift
+      ;;
+    *)
+      usage
+      ;;
+  esac
+done
+
+for path in "${symlinks[@]}"; do
+  [ -n "$path" ] || continue
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    rm -f "$path"
+  fi
+done
+
+if [ -n "$socket_dir" ] && [ -d "$socket_dir" ]; then
+  find "$socket_dir" -maxdepth 1 -type s -print -delete >/dev/null 2>&1 || true
+fi

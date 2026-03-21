@@ -1,0 +1,18 @@
+--- a/arch/mips/include/asm/pgtable-32.h
++++ b/arch/mips/include/asm/pgtable-32.h
+@@ -198,6 +198,8 @@
+ 
+ #define pte_page(x)		pfn_to_page(pte_pfn(x))
+ 
++#if defined(CONFIG_CPU_R3000) || defined(CONFIG_CPU_TX39XX) || defined(CONFIG_CPU_RLX4181)
++
+ #if defined(CONFIG_CPU_R3K_TLB)
+ 
+ /* Swap entries must have VALID bit cleared. */
+@@ -245,4 +247,6 @@
+ 
+ #endif /* defined(CONFIG_CPU_R3K_TLB) */
+ 
++#endif /* defined(CONFIG_CPU_R3000) || defined(CONFIG_CPU_TX39XX) || defined(CONFIG_CPU_RLX4181) */
++
+ #endif /* _ASM_PGTABLE_32_H */

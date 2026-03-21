@@ -1,0 +1,81 @@
+--- a/arch/mips/mm/tlbex.c
++++ b/arch/mips/mm/tlbex.c
+@@ -2618,44 +2618,53 @@
+ 	check_pabits();
+ 
+ #ifdef CONFIG_64BIT
+-	check_for_high_segbits = current_cpu_data.vmbits > (PGDIR_SHIFT + PGD_ORDER + PAGE_SHIFT - 3);
++	check_for_high_segbits = current_cpu_data.vmbits >
++		(PGDIR_SHIFT + PGD_ORDER + PAGE_SHIFT - 3);
+ #endif
+ 
+-	if (cpu_has_3kex) {
++	switch (current_cpu_type()) {
++	case CPU_RLX4181:
+ #ifndef CONFIG_MIPS_PGD_C0_CONTEXT
++		/* RLX4181 is R3000-class: use r3000 handlers, no local EBase. */
++		build_r3000_tlb_refill_handler();
++
+ 		if (!run_once) {
+ 			build_setup_pgd();
+-			build_r3000_tlb_refill_handler();
+ 			build_r3000_tlb_load_handler();
+ 			build_r3000_tlb_store_handler();
+ 			build_r3000_tlb_modify_handler();
+ 			flush_tlb_handlers();
+-			run_once++;
++			run_once = 1;
+ 		}
+ #else
+-		panic("No R3000 TLB refill handler");
++		panic("RLX4181 requires R3000 TLB handlers; CONFIG_MIPS_PGD_C0_CONTEXT not supported");
+ #endif
+-		return;
+-	}
+-
+-	if (cpu_has_ldpte)
+-		setup_pw();
++		break;
+ 
+-	if (!run_once) {
+-		scratch_reg = allocate_kscratch();
+-		build_setup_pgd();
+-		build_r4000_tlb_load_handler();
+-		build_r4000_tlb_store_handler();
+-		build_r4000_tlb_modify_handler();
++	default:
+ 		if (cpu_has_ldpte)
+-			build_loongson3_tlb_refill_handler();
+-		else
+-			build_r4000_tlb_refill_handler();
+-		flush_tlb_handlers();
+-		run_once++;
++			setup_pw();
++
++		if (!run_once) {
++			scratch_reg = allocate_kscratch();
++			build_setup_pgd();
++			build_r4000_tlb_load_handler();
++			build_r4000_tlb_store_handler();
++			build_r4000_tlb_modify_handler();
++			if (cpu_has_ldpte)
++				build_loongson3_tlb_refill_handler();
++			else
++				build_r4000_tlb_refill_handler();
++			flush_tlb_handlers();
++			run_once = 1;
++		}
++
++		if (cpu_has_xpa)
++			config_xpa_params();
++		if (cpu_has_htw)
++			config_htw_params();
++		break;
+ 	}
+-	if (cpu_has_xpa)
+-		config_xpa_params();
+-	if (cpu_has_htw)
+-		config_htw_params();
+ }
++
++

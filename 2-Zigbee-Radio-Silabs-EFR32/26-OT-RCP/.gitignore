@@ -1,0 +1,4 @@
+# Keep firmware for users who just want to flash
+!firmware/
+!firmware/*.gbl
+!firmware/*.s37

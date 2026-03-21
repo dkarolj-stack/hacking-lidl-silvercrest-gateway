@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+conf="${CPCD_CONF:-$HOME/.config/rcp-stack/cpcd.conf}"
+instance="${CPC_INSTANCE_NAME:-cpcd_bringup}"
+socket_dir="${CPC_SOCKET_DIR:-/dev/shm/cpcd/$instance}"
+
+if [ ! -f "$conf" ]; then
+  echo "warn: cpcd config not found: $conf" >&2
+  exit 0
+fi
+
+conf_socket="$(sed -n 's/^[[:space:]]*socket_folder:[[:space:]]*//p' "$conf" | head -n 1)"
+conf_socket="${conf_socket%%#*}"
+conf_socket="${conf_socket#"${conf_socket%%[![:space:]]*}"}"
+conf_socket="${conf_socket%"${conf_socket##*[![:space:]]}"}"
+conf_socket="${conf_socket%\"}"
+conf_socket="${conf_socket#\"}"
+conf_socket="${conf_socket%\'}"
+conf_socket="${conf_socket#\'}"
+
+if [ -z "$conf_socket" ]; then
+  if [ -z "${CPC_SOCKET_DIR:-}" ] || [ "$socket_dir" = "/dev/shm" ]; then
+    echo "warn: cpcd.conf has no socket_folder; cpcd will use its built-in default." >&2
+    exit 0
+  fi
+  echo "error: cpcd.conf missing socket_folder; expected $socket_dir. Add socket_folder to $conf." >&2
+  exit 1
+fi
+
+if [ "$conf_socket" != "$socket_dir" ]; then
+  echo "error: cpcd.conf socket_folder ($conf_socket) does not match CPC_SOCKET_DIR ($socket_dir)." >&2
+  exit 1
+fi

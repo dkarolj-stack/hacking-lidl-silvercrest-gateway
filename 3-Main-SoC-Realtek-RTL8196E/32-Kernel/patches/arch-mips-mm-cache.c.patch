@@ -1,0 +1,15 @@
+--- a/arch/mips/mm/cache.c
++++ b/arch/mips/mm/cache.c
+@@ -229,7 +229,12 @@
+ 
+ 		octeon_cache_init();
+ 	}
++	if (cpu_has_lexra_cache) {
++		extern void __weak lexra_cache_init(void);
+ 
++		lexra_cache_init();
++	}
++	
+ 	setup_protection_map();
+ }
+ 

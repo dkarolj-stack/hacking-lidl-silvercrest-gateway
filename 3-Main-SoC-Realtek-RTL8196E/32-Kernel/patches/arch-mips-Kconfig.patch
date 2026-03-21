@@ -1,0 +1,129 @@
+--- a/arch/mips/Kconfig
++++ b/arch/mips/Kconfig
+@@ -630,6 +630,29 @@
+ 	select CLKDEV_LOOKUP
+ 	select ARCH_HAS_RESET_CONTROLLER
+ 	select RESET_CONTROLLER
++	
++config REALTEK
++	bool "Realtek RLX based SoC"
++	select SYS_HAS_CPU_MIPS32_R1
++	select SYS_HAS_CPU_MIPS32_R2   # Selected by defconfig, good to have
++	select SYS_SUPPORTS_BIG_ENDIAN
++	select SYS_SUPPORTS_LITTLE_ENDIAN
++	select BOOT_RAW
++	select DMA_NONCOHERENT
++	select IRQ_MIPS_CPU
++	select USE_OF
++	select SYS_SUPPORTS_MIPS16
++	select SYS_SUPPORTS_32BIT_KERNEL
++	select SYS_HAS_EARLY_PRINTK
++	select COMMON_CLK
++	select TIMER_OF
++	select CLKSRC_MMIO
++	select PINCTRL
++	select PINMUX
++	select IRQ_DOMAIN
++	select MULTI_IRQ_HANDLER
++	help
++	  Support for Realtek RLX SoC based board
+ 
+ config SGI_IP22
+ 	bool "SGI IP22 (Indy/Indigo2)"
+@@ -1051,6 +1074,7 @@
+ source "arch/mips/pic32/Kconfig"
+ source "arch/mips/pistachio/Kconfig"
+ source "arch/mips/ralink/Kconfig"
++source "arch/mips/realtek/Kconfig"
+ source "arch/mips/sgi-ip27/Kconfig"
+ source "arch/mips/sibyte/Kconfig"
+ source "arch/mips/txx9/Kconfig"
+@@ -1651,6 +1675,12 @@
+ 	  of the supported machines have an R4000 (or similar) CPU, R4x00
+ 	  might be a safe bet.  If the resulting kernel does not work,
+ 	  try to recompile with R3000.
++	  
++config CPU_RLX4181
++	bool "RLX4181"
++	depends on SYS_HAS_CPU_RLX4181
++	select CPU_SUPPORTS_32BIT_KERNEL
++	select CPU_SUPPORTS_HIGHMEM
+ 
+ config CPU_TX39XX
+ 	bool "R39XX"
+@@ -2000,6 +2030,9 @@
+ 
+ config SYS_HAS_CPU_R3000
+ 	bool
++	
++config SYS_HAS_CPU_RLX4181
++	bool
+ 
+ config SYS_HAS_CPU_TX39XX
+ 	bool
+@@ -2243,7 +2276,7 @@
+ 
+ config PAGE_SIZE_16KB
+ 	bool "16kB"
+-	depends on !CPU_R3000 && !CPU_TX39XX
++	depends on !CPU_R3000 && !CPU_TX39XX && !CPU_RLX4181
+ 	help
+ 	  Using 16kB page size will result in higher performance kernel at
+ 	  the price of higher memory consumption.  This option is available on
+@@ -2262,7 +2295,7 @@
+ 
+ config PAGE_SIZE_64KB
+ 	bool "64kB"
+-	depends on !CPU_R3000 && !CPU_TX39XX
++	depends on !CPU_R3000 && !CPU_TX39XX && !CPU_RLX4181
+ 	help
+ 	  Using 64kB page size will result in higher performance kernel at
+ 	  the price of higher memory consumption.  This option is available on
+@@ -2330,7 +2363,7 @@
+ 
+ config CPU_GENERIC_DUMP_TLB
+ 	bool
+-	default y if !(CPU_R3000 || CPU_TX39XX)
++	default y if !(CPU_R3000 || CPU_TX39XX || CPU_RLX4181)
+ 
+ config MIPS_FP_SUPPORT
+ 	bool "Floating Point support" if EXPERT
+@@ -2358,11 +2391,11 @@
+ config CPU_R4K_FPU
+ 	bool
+ 	depends on MIPS_FP_SUPPORT
+-	default y if !CPU_R2300_FPU
++	default y if !(CPU_R2300_FPU || CPU_RLX4181)
+ 
+ config CPU_R4K_CACHE_TLB
+ 	bool
+-	default y if !(CPU_R3K_TLB || CPU_SB1 || CPU_CAVIUM_OCTEON)
++	default y if !(CPU_R3K_TLB || CPU_SB1 || CPU_CAVIUM_OCTEON || CPU_RLX4181)
+ 
+ config MIPS_MT_SMP
+ 	bool "MIPS MT SMP support (1 TC on each available VPE)"
+@@ -2608,7 +2641,7 @@
+ 
+ config CPU_HAS_SYNC
+ 	bool
+-	depends on !CPU_R3000
++	depends on !(CPU_R3000 || CPU_RLX4181)
+ 	default y
+ 
+ #
+@@ -2630,13 +2663,13 @@
+ 
+ config MIPS_ASID_SHIFT
+ 	int
+-	default 6 if CPU_R3000 || CPU_TX39XX
++	default 6 if CPU_R3000 || CPU_TX39XX || CPU_RLX4181
+ 	default 0
+ 
+ config MIPS_ASID_BITS
+ 	int
+ 	default 0 if MIPS_ASID_BITS_VARIABLE
+-	default 6 if CPU_R3000 || CPU_TX39XX
++	default 6 if CPU_R3000 || CPU_TX39XX || CPU_RLX4181
+ 	default 8
+ 
+ config MIPS_ASID_BITS_VARIABLE

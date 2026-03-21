@@ -1,0 +1,8 @@
+# /etc/inittab - init configuration for busybox init
+#
+# Minimal inittab in squashfs rootfs - boots system and mounts /userdata
+# Full configuration is in /userdata/etc/inittab (loaded after mount)
+#
+::sysinit:/etc/init.d/rcS
+#ttyS0::askfirst:/bin/login        # DEBUG: login bypassed
+ttyS0::respawn:-/bin/sh

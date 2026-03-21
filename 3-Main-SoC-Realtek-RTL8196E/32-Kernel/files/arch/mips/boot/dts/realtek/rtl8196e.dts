@@ -1,0 +1,111 @@
+// SPDX-License-Identifier: GPL-2.0
+/dts-v1/;
+#include "rtl819x.dtsi"
+
+/ {
+	compatible = "realtek,rtl8196e", "realtek,rtl819x-soc";
+	model = "Realtek RTL8196E SoC";
+	
+	chosen {
+	    bootargs = "console=ttyS0,38400 loglevel=4 root=/dev/mtdblock2 rootfstype=squashfs";
+	};
+	
+	memory@0 {
+		device_type = "memory";
+		reg = <0x00000000 0x02000000>;  /* 32MB */
+	};
+};
+
+/* Activation de l'UART0 pour la console */
+&uart0 {
+	status = "okay";
+};
+
+&uart1 {
+	status = "okay";
+};
+
+&gpio0 {
+	status = "okay";
+};
+
+/* Configuration SPI Flash */
+&spi0 {
+	status = "okay";
+	
+	flash@0 {
+		compatible = "jedec,spi-nor";
+		reg = <0>;
+		spi-max-frequency = <25000000>;
+		
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+			
+			partition@0 {
+				label = "boot+cfg";
+				reg = <0x000000 0x020000>;      /* 128 KB */
+				read-only;
+			};
+			
+			partition@20000 {
+				label = "linux";
+				reg = <0x020000 0x1e0000>;      /* 1920 KB (1.9 MB) */
+			};
+			
+			partition@200000 {
+				label = "rootfs";
+				reg = <0x200000 0x200000>;      /* 2 MB  */
+			};
+
+			partition@420000 {
+				label = "jffs2-fs";
+				reg = <0x400000 0xc00000>;      /* 12 MB */
+			};
+		};
+	};
+};
+
+/* Ethernet configuration */
+&ethernet {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	/* DT v3.0: Full VLAN configuration with multi-interface support
+	 * Each child node represents one network interface (eth0, eth1, etc.)
+	 * Replaces hardcoded vlanconfig[] array in rtl_nic.c:260-267
+	 */
+
+	interface@0 {
+		reg = <0>;
+		ifname = "eth0";
+
+		/* MAC address (standard DT binding) */
+		local-mac-address = [02 14 B8 EE B7 54];
+
+		/* VLAN configuration */
+		vlan-id = <1>;              /* VLAN ID (VID) */
+		forwarding-id = <0>;        /* Forwarding database ID (FID) */
+		member-ports = <0x10>;      /* Port mask: 0x10 = port 4 (bit 4 set) */
+		untag-ports = <0x10>;       /* Untagged port mask: port 4 untagged */
+		is-wan = <0>;               /* 0 = LAN interface, 1 = WAN interface */
+		mtu = <1500>;               /* Maximum transmission unit */
+	};
+
+	/* Example for future eth1/WAN interface:
+	 *
+	 * interface@1 {
+	 *     reg = <1>;
+	 *     ifname = "eth1";
+	 *     local-mac-address = [02 14 B8 EE B7 55];
+	 *     vlan-id = <2>;
+	 *     forwarding-id = <0>;
+	 *     member-ports = <0x20>;    // Port 5 (bit 5)
+	 *     untag-ports = <0x20>;
+	 *     is-wan = <1>;             // WAN interface
+	 *     mtu = <1500>;
+	 * };
+	 */
+};

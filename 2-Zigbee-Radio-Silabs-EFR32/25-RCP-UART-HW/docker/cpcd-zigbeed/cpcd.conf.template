@@ -1,0 +1,13 @@
+# cpcd configuration for Docker container
+# Variables are substituted by entrypoint.sh at runtime
+
+instance_name: ${CPCD_INSTANCE}
+bus_type: UART
+uart_device_file: /tmp/ttyCpcRcp
+uart_device_baud: ${UART_BAUDRATE}
+uart_hardflow: true
+disable_encryption: true
+stdout_trace: false
+trace_to_file: false
+traces_folder: /var/log/cpcd
+socket_folder: /dev/shm/cpcd/${CPCD_INSTANCE}
