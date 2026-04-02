@@ -151,8 +151,8 @@ Standard Linux LED sysfs for the STATUS LED (the LAN LED is controlled
 via `led_mode`, not via this driver — see "Dual brightness mode" below):
 
 ```sh
-# Set STATUS LED to 25 % brightness
-echo 64 > /sys/class/leds/status/brightness
+# Set STATUS LED to dim (matches LAN LED scan mode)
+echo 60 > /sys/class/leds/status/brightness
 
 # Full brightness (no PWM overhead)
 echo 255 > /sys/class/leds/status/brightness
@@ -207,7 +207,7 @@ Conversely, writing to `LEDCREG` (0xBB80_4300) immediately changes the
 LAN LED behaviour:
 - `LEDCREG = 0x0020_0000` (LEDMODE_DIRECT) → full brightness,
   link/activity
-- `LEDCREG = 0x0000_0000` (scan mode) → dim blinking (~15 % of full)
+- `LEDCREG = 0x0000_0000` (scan mode) → dim blinking (~25 % of full)
 
 The STATUS LED (GPIO B3) works correctly via GPIO in both GPIO and
 ASIC LED modes.
@@ -218,28 +218,35 @@ The LAN LED is physically connected to the switch ASIC's LED_PORT0
 output, bypassing the pin mux.  This is likely a PCB design choice by
 Tuya/Lidl.  Only `LEDCREG` controls it.
 
-### Dual brightness mode
+### DIRECTLCR register — true LED off
 
-To allow users to reduce LED brightness (e.g. for nighttime use), the
-`S11leds` init script reads `/userdata/etc/leds.conf` and configures
+The `DIRECTLCR` register (0xBB80_4314, physical 0x1B80_4314) controls
+the LED output scale in direct mode.  Its reset value is `0x1003FFFF`.
+
+Setting `DIRECTLCR = 0` completely disables the LED output — no residual
+glow, unlike scan mode which still produces ~25% perceived brightness.  Restoring
+`DIRECTLCR = 0x1003FFFF` re-enables the LED.
+
+This was discovered empirically (not documented in the SDK).  Bit 8
+alone is sufficient to turn the LED off, but we write 0 for simplicity.
+
+### LED modes (bright / dim / off)
+
+The `S11leds` init script reads `/userdata/etc/leds.conf` and configures
 both LEDs at boot:
 
 ```sh
-# Switch to dim
-echo MODE=dim > /userdata/etc/leds.conf
-/userdata/etc/init.d/S11leds start
-
-# Switch to bright
-echo MODE=bright > /userdata/etc/leds.conf
+echo MODE=off > /userdata/etc/leds.conf     # all LEDs off
+echo MODE=dim > /userdata/etc/leds.conf     # reduced brightness
+echo MODE=bright > /userdata/etc/leds.conf  # full brightness (default)
 /userdata/etc/init.d/S11leds start
 ```
 
 Internally, `S11leds` sets:
-- **bright**: `led_mode = bright` → `LEDCREG = LEDMODE_DIRECT`, STATUS PWM = 255
-- **dim**: `led_mode = dim` → `LEDCREG = 0` (scan mode), STATUS PWM = 60
-
-The value 60 was determined experimentally to match the perceived
-brightness of the LAN LED in scan mode.
+- **bright**: `DIRECTLCR = default`, `LEDCREG = LEDMODE_DIRECT`, STATUS PWM = 255
+- **dim**: `DIRECTLCR = default`, `LEDCREG = 0` (scan mode), STATUS PWM = 60
+- **off**: `DIRECTLCR = 0` (LAN LED fully off), STATUS PWM = 0
 
 `serialgateway` and `S70otbr` read `/sys/class/net/eth0/led_mode` to
 automatically set the correct STATUS LED brightness when turning it on.
+When `led_mode = off`, the STATUS LED stays at 0.
