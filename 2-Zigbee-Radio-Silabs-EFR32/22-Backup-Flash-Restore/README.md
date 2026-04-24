@@ -4,7 +4,7 @@
 
 This guide covers the **EFR32MG1B Zigbee radio chip** firmware, not the main Linux system running on the RTL8196E SoC. The Lidl Silvercrest gateway contains two separate processors:
 
-- **RTL8196E** (main SoC): Runs Linux and hosts `serialgateway`
+- **RTL8196E** (main SoC): Runs Linux 6.18 with the in-kernel `rtl8196e-uart-bridge` driver exposing the EFR32 UART on TCP:8888
 - **EFR32MG1B232F256GM48** (Zigbee radio): Runs the EmberZNet/EZSP firmware covered here
 
 Before modifying the Zigbee radio firmware, it is **strongly recommended** to back up the original firmware. This ensures you can recover in case of a failed update or configuration error.
@@ -95,7 +95,7 @@ commander gbl flash --device EFR32MG1B232F256GM48 firmware.gbl
 
 ## Method 2: Software-Based Flash via UART
 
-This method uses `serialgateway` on the Lidl gateway to expose the EFR32 serial port over TCP, allowing remote firmware updates via the Gecko Bootloader.
+This method uses the in-kernel `rtl8196e-uart-bridge` (6.18 kernel) on the Lidl gateway to expose the EFR32 serial port over TCP, allowing remote firmware updates via the Gecko Bootloader.
 
 > **Limitation**: This method only supports `.gbl` files. For full backup/restore, use Method 1 (SWD).
 
@@ -106,8 +106,8 @@ Use the `flash_efr32.sh` script at the repository root:
 ```
 
 The script handles everything automatically: installs `universal-silabs-flasher`
-in a venv, restarts serialgateway in flash mode via SSH, flashes the selected
-firmware, and reboots the gateway.
+in a venv, switches the in-kernel UART bridge to flash mode (`flow_control=0`)
+via SSH, flashes the selected firmware, and reboots the gateway.
 
 See [35-Migration](../../3-Main-SoC-Realtek-RTL8196E/35-Migration/README.md) for details on the script.
 
@@ -132,8 +132,8 @@ Your PC                          Gateway                         EFR32
 ───────                          ───────                         ─────
     │                                │                              │
     │  socket://192.168.1.88:8888     │                              │
-    ├───────────────────────────────>│      serialgateway           │
-    │                                │        (TCP↔UART)            │
+    ├───────────────────────────────>│  rtl8196e-uart-bridge        │
+    │                                │        (TCP↔UART, kernel)    │
     │                                │                              │
     │  1. Probe firmware type        │                              │
     │  ─────────────────────────────>│──────────────────────────────>
@@ -204,32 +204,39 @@ Probing ApplicationType.GECKO_BOOTLOADER at 115200 baud
 Detected ApplicationType.GECKO_BOOTLOADER at 115200 baud
 ```
 
-### The `-f` Flag Explained
+### The `flow_control` sysfs param Explained
 
 The Gecko Bootloader uses **software flow control** (XON/XOFF), while normal firmware operation (NCP, RCP) requires **hardware flow control** (RTS/CTS).
 
-| serialgateway Mode | Flow Control | When to Use |
-|--------------------|--------------|-------------|
-| `serialgateway` | Hardware (RTS/CTS) | Normal operation (Z2M, ZHA) |
-| `serialgateway -f` | Software (none) | Flashing via bootloader |
+| Bridge state | `flow_control` | Flow Control | When to Use |
+|--------------|----------------|--------------|-------------|
+| normal       | `1` (default)  | Hardware (RTS/CTS) | Normal operation (Z2M, ZHA) |
+| flash        | `0`            | Software (none)    | Flashing via bootloader |
 
-**Why flashing fails without `-f`:**
+Write the value to the sysfs knob — the bridge stays armed, TCP:8888 never drops:
+```sh
+echo 0 > /sys/module/rtl8196e_uart_bridge/parameters/flow_control   # flash mode
+echo 1 > /sys/module/rtl8196e_uart_bridge/parameters/flow_control   # normal
+```
+`flash_efr32.sh` does this automatically and restores `flow_control=1` on exit.
+
+**Why flashing fails with `flow_control=1`:**
 
 ```
 Normal mode (hardware flow control):
 ┌─────────────┐     RTS/CTS     ┌─────────────┐
-│ serialgw    │<───────────────>│   EFR32     │
-│ (HW flow)   │                 │ (bootloader)│
+│ kernel      │<───────────────>│   EFR32     │
+│ UART bridge │                 │ (bootloader)│
 └─────────────┘                 └─────────────┘
                                       │
                   Bootloader ignores RTS/CTS
                   → Xmodem responses blocked!
                   → Timeout → FailedToEnterBootloaderError
 
-With -f flag (software flow control):
+With flow_control=0 (software flow control):
 ┌─────────────┐      TX/RX      ┌─────────────┐
-│ serialgw    │<───────────────>│   EFR32     │
-│ (SW flow)   │   (no RTS/CTS)  │ (bootloader)│
+│ kernel      │<───────────────>│   EFR32     │
+│ UART bridge │   (no RTS/CTS)  │ (bootloader)│
 └─────────────┘                 └─────────────┘
                                       │
                   Xmodem works correctly
@@ -249,7 +256,7 @@ With -f flag (software flow control):
 
 | Error | Cause | Solution |
 |-------|-------|----------|
-| `FailedToEnterBootloaderError` | HW flow control blocking bootloader | Use `serialgateway -f` |
+| `FailedToEnterBootloaderError` | HW flow control blocking bootloader | Write `0` to `flow_control` sysfs param |
 | `Failed to probe running application` | Device not responding | Power cycle gateway, check IP |
 | `Xmodem timeout` | Network latency or other process using port | Use wired Ethernet, close SSH sessions |
 | `GBL signature verification failed` | Corrupt or incompatible firmware | Re-download firmware, check SDK version |
@@ -265,8 +272,9 @@ If you have an SSH session with an active `nc` or previous flasher run connected
 Terminal 1: ssh gateway → nc localhost 8888  (still open!)
 Terminal 2: universal-silabs-flasher ...     (fails!)
 
-# Good: close everything first
-Terminal 1: ssh gateway → killall nc; killall serialgateway; serialgateway -f
+# Good: close the nc session and put the bridge in flash mode
+Terminal 1: ssh gateway → killall nc
+           → echo 0 > /sys/module/rtl8196e_uart_bridge/parameters/flow_control
 Terminal 2: universal-silabs-flasher ...     (works!)
 ```
 

@@ -2,7 +2,7 @@
 # build_zigbeed.sh - Build and install zigbeed from Simplicity SDK (EmberZNet 8.2.2)
 #
 # Portable script for x86_64, ARM64 (Raspberry Pi 4/5), ARM32.
-# Automatically downloads Simplicity SDK 2025.6.2 if not present.
+# Automatically downloads Simplicity SDK 2025.6.3 if not present.
 #
 # Prerequisites:
 #   - slc-cli in PATH (install via 1-Build-Environment/)
@@ -45,7 +45,7 @@ CPC_DIR="${SCRIPT_DIR}/../cpcd/cpc-daemon"
 # Project paths
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 SILABS_TOOLS="${PROJECT_ROOT}/silabs-tools"
-SIMPLICITY_SDK="${SILABS_TOOLS}/simplicity_sdk_2025.6.2"
+SIMPLICITY_SDK="${SILABS_TOOLS}/simplicity_sdk_2025.6.3"
 ZIGBEED_SAMPLE="${SIMPLICITY_SDK}/protocol/zigbee/app/projects/zigbeed"
 
 REPO_OWNER=$(git remote get-url origin 2>/dev/null | sed -E 's/.*[:\/](.*)\/.*\..*/\1/') || true
@@ -101,7 +101,7 @@ echo "========================================="
 # =========================================
 
 # SDK version configuration
-SIMPLICITY_SDK_VERSION="2025.6.2"
+SIMPLICITY_SDK_VERSION="2025.6.3"
 SIMPLICITY_SDK_TAG="v${SIMPLICITY_SDK_VERSION}"
 
 # Check/install SDK
@@ -191,8 +191,8 @@ slc generate zigbeed.slcp \
     --force 2>&1 | tail -5
 
 # Replace partial SDK copy with symlink (slc copies some files, but not all headers)
-rm -rf simplicity_sdk_2025.6.2
-ln -s "${SIMPLICITY_SDK}" simplicity_sdk_2025.6.2
+rm -rf simplicity_sdk_2025.6.3
+ln -s "${SIMPLICITY_SDK}" simplicity_sdk_2025.6.3
 
 # =========================================
 # Build

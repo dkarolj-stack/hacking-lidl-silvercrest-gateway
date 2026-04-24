@@ -1,7 +1,7 @@
 # RCP 802.15.4 for Lidl Silvercrest Gateway
 # Based on SDK sample: protocol/openthread/sample-apps/ot-ncp/rcp-uart-802154.slcp
 # Target: EFR32MG1B232F256GM48
-# UART: USART0, PA0/PA1/PA4/PA5, 115200 baud, HW flow control
+# UART: USART0, PA0/PA1/PA4/PA5, 460800 baud, HW flow control
 
 project_name: rcp-uart-802154
 label: RCP 802.15.4 (Lidl Gateway)
@@ -41,9 +41,9 @@ configuration:
   - name: SL_BOARD_ENABLE_VCOM
     value: 1
 
-  # UART: 115200 baud, HW flow control
+  # UART: 460800 baud, HW flow control (matches S50uart_bridge default on the gateway)
   - name: SL_CPC_DRV_UART_VCOM_BAUDRATE
-    value: 115200
+    value: 460800
   - name: SL_CPC_DRV_UART_VCOM_FLOW_CONTROL_TYPE
     value: usartHwFlowControlCtsAndRts
 

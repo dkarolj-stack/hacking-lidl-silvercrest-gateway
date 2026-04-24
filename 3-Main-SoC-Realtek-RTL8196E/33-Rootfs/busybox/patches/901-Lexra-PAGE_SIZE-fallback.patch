@@ -1,0 +1,21 @@
+From: Jacques Nilo <jacquesnilo@gmail.com>
+Subject: [PATCH] busybox 901-Lexra-PAGE_SIZE-fallback
+
+Fallback PAGE_SIZE for cross-compilation (getconf PAGE_SIZE queries the host machine; force a value suitable for the MIPS target)
+
+---
+--- a/scripts/generate_BUFSIZ.sh	2023-01-05 16:29:10.000000000 +0100
++++ b/scripts/generate_BUFSIZ.sh	2026-04-17 09:08:19.640834870 +0200
+@@ -90,10 +90,10 @@
+ 	$CC -c "page_size_$$.c" || exit 1
+ 	PAGE_SIZE=`$NM --size-sort "page_size_$$.o" | cut -d' ' -f1`
+ 	rm "page_size_$$.c" "page_size_$$.o"
+-	test x"$PAGE_SIZE" = x"" && exit 1
++	test x"$PAGE_SIZE" = x"" && PAGE_SIZE="1000"
+ 	$debug && echo "PAGE_SIZE:0x$PAGE_SIZE $((0x$PAGE_SIZE))"
+ 	PAGE_SIZE=$((0x$PAGE_SIZE))
+-	test $PAGE_SIZE -lt 1024 && exit 1
++	test $PAGE_SIZE -lt 1024 && PAGE_SIZE=4096
+ 
+ 	# How much space between _end[] and next page?
+ 	PAGE_MASK=$((PAGE_SIZE-1))

@@ -102,9 +102,9 @@ WORKDIR /home/builder
 # Step 3: Install crosstool-ng
 # ============================================================================
 RUN cd /tmp && \
-    wget -q http://crosstool-ng.org/download/crosstool-ng/crosstool-ng-1.26.0.tar.bz2 && \
-    tar xjf crosstool-ng-1.26.0.tar.bz2 && \
-    cd crosstool-ng-1.26.0 && \
+    wget -q http://crosstool-ng.org/download/crosstool-ng/crosstool-ng-1.28.0.tar.bz2 && \
+    tar xjf crosstool-ng-1.28.0.tar.bz2 && \
+    cd crosstool-ng-1.28.0 && \
     ./configure --prefix=$HOME/crosstool-ng >/dev/null && \
     make -j$(nproc) >/dev/null && \
     make install >/dev/null && \

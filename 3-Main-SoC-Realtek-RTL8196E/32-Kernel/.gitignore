@@ -1,0 +1,4 @@
+# Output of scripts/test_rtl8196e_eth.sh — one dated directory per run.
+# These accumulate quickly in the working tree and aren't meant to be
+# shared in-tree; keep reports in a separate archive if you want history.
+test_results_*/

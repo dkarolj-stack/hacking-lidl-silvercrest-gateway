@@ -14,7 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
 # Configuration
-VERSION="6.5"
+VERSION="6.6"
 SOURCE_DIR="${SCRIPT_DIR}/ncurses-${VERSION}"
 INSTALL_PREFIX="${SCRIPT_DIR}/ncursesw-install"
 

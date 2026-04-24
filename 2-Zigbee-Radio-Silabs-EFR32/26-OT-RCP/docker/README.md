@@ -7,8 +7,8 @@ Each use case has its own Docker Compose file.
 
 | # | Use case | Compose file | What runs on gateway | What runs on host (Docker) |
 |---|----------|-------------|---------------------|---------------------------|
-| 1 | **ZoH** (Zigbee) | `docker-compose-zoh.yml` | serialgateway | Zigbee2MQTT + Mosquitto |
-| 2 | **OTBR on host** | `docker-compose-otbr-host.yml` | serialgateway | OTBR + Matter Server + HA |
+| 1 | **ZoH** (Zigbee) | `docker-compose-zoh.yml` | in-kernel UART bridge | Zigbee2MQTT + Mosquitto |
+| 2 | **OTBR on host** | `docker-compose-otbr-host.yml` | in-kernel UART bridge | OTBR + Matter Server + HA |
 | 3 | **OTBR on gateway** | `docker-compose-otbr-gateway.yml` | otbr-agent (native) | Matter Server + HA |
 
 ```
@@ -20,10 +20,10 @@ Each use case has its own Docker Compose file.
                         └───────┬──────────┘       └───────┬──────────┘       └───────┬──────────┘
                                 │ TCP :8888                │ TCP :8888                │ REST :8081
                         ┌───────┴──────────┐       ┌───────┴──────────┐       ┌───────┴──────────┐
-         Gateway        │  serialgateway   │       │  serialgateway   │       │  otbr-agent      │
-         (RTL8196E)     │  (Zigbee mode)   │       │  (Zigbee mode)   │       │  (Thread mode)   │
+         Gateway        │  rtl8196e-uart-  │       │  rtl8196e-uart-  │       │  otbr-agent      │
+         (RTL8196E)     │  bridge (kernel) │       │  bridge (kernel) │       │  (Thread mode)   │
                         └───────┬──────────┘       └───────┬──────────┘       └───────┬──────────┘
-                                │ UART 115200              │ UART 115200              │ UART 115200
+                                │ UART 460800              │ UART 460800              │ UART 460800
                         ┌───────┴──────────┐       ┌───────┴──────────┐       ┌───────┴──────────┐
          EFR32          │  OT-RCP          │       │  OT-RCP          │       │  OT-RCP          │
                         │  (same firmware) │       │  (same firmware) │       │  (same firmware) │
@@ -31,9 +31,10 @@ Each use case has its own Docker Compose file.
 ```
 
 **Key difference between use cases 2 and 3:** In use case 2, OTBR runs in Docker
-on your PC and connects to the gateway's `serialgateway` over TCP. In use case 3
-(v2.0+), OTBR runs natively on the gateway's RTL8196E CPU — no serialgateway, no
-TCP bridge. The host only needs Matter Server + Home Assistant.
+on your PC and connects to the gateway's in-kernel UART bridge over TCP.
+In use case 3 (v2.0+), OTBR runs natively on the gateway's RTL8196E CPU
+(otbr-agent opens `/dev/ttyS1` directly) — no TCP bridge needed. The host
+only needs Matter Server + Home Assistant.
 
 ---
 
@@ -43,7 +44,7 @@ TCP bridge. The host only needs Matter Server + Home Assistant.
 
 - **EFR32 flashed with OT-RCP firmware** (`ot-rcp.gbl`)
 - **Gateway in the correct radio mode:**
-  - Use cases 1 & 2: Zigbee mode (serialgateway)
+  - Use cases 1 & 2: Zigbee mode (in-kernel UART bridge)
   - Use case 3: Thread mode (otbr-agent)
 
 ### Switching Radio Mode (no reflash needed)
@@ -103,8 +104,9 @@ Runs Zigbee2MQTT with the `zoh` adapter. The Zigbee stack runs on the host
 
 ## Use Case 2: OTBR on Host — Thread/Matter (Docker)
 
-OTBR runs in Docker on your PC, connecting to the gateway's `serialgateway`
-over TCP. The full stack (OTBR + Matter Server + HA) runs on the host.
+OTBR runs in Docker on your PC, connecting to the gateway's in-kernel
+UART↔TCP bridge over TCP. The full stack (OTBR + Matter Server + HA)
+runs on the host.
 
 ### Quick Start
 
@@ -162,8 +164,9 @@ Open http://localhost:8123, create your account, then add integrations
 ## Use Case 3: OTBR on Gateway — Thread/Matter (native, v2.0+)
 
 OTBR runs **natively on the gateway** (otbr-agent on the RTL8196E CPU).
-No Docker OTBR container, no serialgateway, no TCP bridge between OTBR and
-the radio. The host only runs Matter Server + Home Assistant.
+No Docker OTBR container, and no TCP bridge between OTBR and the radio —
+otbr-agent opens `/dev/ttyS1` directly. The host only runs Matter Server +
+Home Assistant.
 
 This is the recommended setup for Thread/Matter since v2.0.
 

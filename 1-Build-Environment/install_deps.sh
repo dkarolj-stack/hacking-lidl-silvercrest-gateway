@@ -91,7 +91,7 @@ echo "  BUILDING CROSSTOOL-NG"
 echo "========================================="
 echo ""
 
-CT_NG_VERSION="crosstool-ng-1.26.0"
+CT_NG_VERSION="crosstool-ng-1.28.0"
 CT_NG_URL="http://crosstool-ng.org/download/crosstool-ng/${CT_NG_VERSION}.tar.bz2"
 CT_NG_INSTALL_DIR="/tmp/crosstool-ng-install"
 

@@ -14,8 +14,8 @@ advanced:
   log_output:
     - console
 version: 4
-devices:
-  '0xa4c138fba55436c2':
-    friendly_name: '0xa4c138fba55436c2'
-  '0xa4c138d9ec1095c4':
-    friendly_name: '0xa4c138d9ec1095c4'
+# Device list is kept in devices.yaml inside the persistent z2m_data
+# volume (/app/data/devices.yaml). Z2M reads and writes it on its own
+# when sensors are paired or renamed, so personal IEEE addresses never
+# land in this committed config.
+devices: devices.yaml

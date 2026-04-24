@@ -28,10 +28,12 @@ done
 
 log() { [ "$QUIET" -eq 0 ] && echo "$@" || true; }
 
-# Check that fakeroot is installed
+# Check that fakeroot is installed.
+# Errors go to stderr so they survive when this script is invoked with stdout
+# redirected to /dev/null (build_fullflash.sh -q, called by flash_install_rtl8196e.sh).
 if ! command -v fakeroot >/dev/null 2>&1; then
-    echo "❌ fakeroot is not installed"
-    echo "   Installation: sudo apt-get install fakeroot"
+    echo "❌ fakeroot is not installed" >&2
+    echo "   Installation: sudo apt-get install fakeroot" >&2
     exit 1
 fi
 

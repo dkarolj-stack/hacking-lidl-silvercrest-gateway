@@ -1,89 +1,99 @@
-# Docker Stack for Lidl Silvercrest Gateway (RCP Mode)
+# Docker Stacks for RCP Firmware (EmberZNet 8.2.2)
 
-Run a complete Zigbee stack (cpcd + zigbeed + Zigbee2MQTT) that connects to your Lidl Gateway running RCP firmware.
+The RCP firmware has one working use case on the Lidl Silvercrest gateway.
+A second one (concurrent Zigbee + Thread) was originally sketched but is
+not achievable on this hardware — see [`cpcd-zigbeed-otbr/README.md`](./cpcd-zigbeed-otbr/README.md).
 
-## What This Does
+## Use Cases at a Glance
 
-This stack turns your Lidl Silvercrest Gateway into a Zigbee coordinator compatible with Home Assistant and other home automation systems:
+| # | Use case | Compose file | EFR32 firmware | Status |
+|---|----------|-------------|----------------|--------|
+| 1 | **Zigbee** (EmberZNet 8.2.2) | `docker-compose-zigbee.yml` | `rcp-uart-802154.gbl` | Tested, stable |
+| 2 | **Multipan** (Zigbee + Thread) | — | — | ❌ Not achievable on EFR32MG1B ([why](./cpcd-zigbeed-otbr/README.md)) |
 
 ```
-Lidl Gateway                         Docker Host
-┌──────────────────────┐            ┌─────────────────────────────────────┐
-│                      │            │                                     │
-│  EFR32 ◄──► serial   │◄── TCP ───►│  cpcd-zigbeed ◄──► Zigbee2MQTT      │
-│  (RCP)     gateway   │    :8888   │  (Zigbee stack)    (Web UI :8080)   │
-│                      │            │                                     │
-└──────────────────────┘            └─────────────────────────────────────┘
+                          Use case 1: Zigbee
+                        ┌──────────────────────┐
+                        │  Zigbee2MQTT         │
+         Docker host    │  + Mosquitto         │
+                        │  Web UI :8080        │
+                        └───────┬──────────────┘
+                                │
+                        ┌───────┴──────────────┐
+                        │  cpcd-zigbeed        │
+                        │  ├── cpcd            │
+                        │  └── zigbeed (IID=1) │
+                        └───────┬──────────────┘
+                                │ TCP :8888
+                        ┌───────┴──────────────┐
+         Gateway        │  rtl8196e-uart-      │
+         (RTL8196E)     │  bridge (kernel)     │
+                        └───────┬──────────────┘
+                                │ UART 460800
+                        ┌───────┴──────────────┐
+         EFR32          │  RCP (single-PAN)    │
+                        └──────────────────────┘
 ```
+
+For Matter-over-Thread on this gateway, reflash the EFR32 with the standalone
+OT-RCP firmware (`../../26-OT-RCP/firmware/ot-rcp.gbl`) and use the Thread
+Border Router compose at `../../26-OT-RCP/docker/docker-compose-otbr-host.yml`.
+
+---
 
 ## Requirements
 
 ### On the Lidl Gateway
 
-1. **EFR32MG1B chip flashed with RCP firmware** - see `../25-RCP-UART-HW/`
-2. **serialgateway running** - exposes the UART on TCP port 8888
+- **EFR32 flashed with RCP firmware** (`rcp-uart-802154.gbl`)
+- **Gateway running kernel 6.18 or newer** with the in-kernel UART bridge
+  (`rtl8196e-uart-bridge`) armed on TCP:8888 (automatic via `S50uart_bridge`
+  at boot)
 
 ### On Your Computer
 
 - Docker and Docker Compose
-- Network **wire** access to the gateway (no WiFi) ideally through a direct cable connection since cpcd may cause latency issues
+- Wired Ethernet to the gateway (recommended — cpcd is latency-sensitive)
 
-## Quick Start
+---
 
-### 1. Get Your Gateway's IP Address
+## Use Case 1: Zigbee — EmberZNet 8.2.2
 
-Find your gateway on the network (default: `192.168.1.88`). Test connectivity:
+Runs Zigbee2MQTT with the `ember` adapter. The Zigbee stack (zigbeed,
+EmberZNet 8.2.2 / EZSP v18) runs in a Docker container that connects to
+the gateway's in-kernel UART bridge over TCP.
 
-```bash
-nc -zv 192.168.1.88 8888
-```
+### Quick Start
 
-### 2. Configure the IP Address
+1. Edit `docker-compose-zigbee.yml` — set your gateway IP:
+   ```yaml
+   environment:
+     - RCP_HOST=192.168.1.88
+   ```
 
-Edit `docker-compose.yml` and change `RCP_HOST` to your gateway's IP:
+2. Start:
+   ```bash
+   docker compose -f docker-compose-zigbee.yml up -d
+   ```
 
-```yaml
-environment:
-  - RCP_HOST=192.168.1.88   # ← Change this if different
-```
+3. Wait ~60 seconds for the stack to initialize. Check:
+   ```bash
+   docker compose -f docker-compose-zigbee.yml logs -f cpcd-zigbeed
+   # should show: "Connected to Secondary", "Secondary CPC vX.Y.Z"
+   ```
 
-### 3. Start the Stack
+4. Open http://localhost:8080
 
-```bash
-docker compose up -d
-```
-
-### 4. Wait for Initialization
-
-The stack takes about 60 seconds to fully start. Check progress:
-
-```bash
-docker compose logs -f cpcd-zigbeed
-```
-
-You should see:
-```
-Connected to Secondary
-Secondary CPC v4.4.7
-zigbeed entered RUNNING state
-```
-
-### 5. Access Zigbee2MQTT
-
-Open http://localhost:8080 in your browser.
-
-## Files
+### Files
 
 | File | Description |
 |------|-------------|
-| `docker-compose.yml` | Main configuration - **edit RCP_HOST here** |
-| `z2m/configuration.yaml` | Zigbee2MQTT settings (adapter, MQTT, etc.) |
-| `mosquitto/mosquitto.conf` | MQTT broker configuration |
+| `docker-compose-zigbee.yml` | Mosquitto + cpcd-zigbeed + Zigbee2MQTT |
+| `z2m/configuration.yaml` | Z2M config (adapter, MQTT) |
+| `mosquitto/mosquitto.conf` | MQTT broker (anonymous, ports 1883/9001) |
 | `cpcd-zigbeed/` | Dockerfile and configs for the cpcd+zigbeed container |
 
-## Docker Image
-
-A pre-built image is available for both PC (amd64) and Raspberry Pi (arm64):
+### Pre-built Image
 
 ```
 ghcr.io/jnilo1/cpcd-zigbeed:latest
@@ -94,145 +104,59 @@ ghcr.io/jnilo1/cpcd-zigbeed:latest
 | `latest` | 4.5.3 | 8.2.2 | v18 |
 | `cpcd4.5.3-ezsp18` | 4.5.3 | 8.2.2 | v18 |
 
-## Configuration Reference
+### Services
 
-### cpcd-zigbeed Environment Variables
+| Port | Service |
+|------|---------|
+| 8080 | Zigbee2MQTT Web UI |
+| 1883 | Mosquitto MQTT |
+| 9001 | Mosquitto WebSocket |
 
-Edit these in `docker-compose.yml`:
+---
 
-| Variable | Value | Description |
-|----------|-------|-------------|
-| `RCP_HOST` | `192.168.1.88` | **Your gateway's IP address** |
-| `RCP_PORT` | `8888` | TCP port (default for serialgateway) |
-| `UART_BAUDRATE` | `115200` | Must match RCP firmware baudrate |
-| `ZIGBEED_DEBUG` | `0` | Debug verbosity (0=off, 1=on, 2=verbose) |
+## Use Case 2: Multipan — not supported on this hardware
 
-### Zigbee2MQTT Settings
+Historical POC to run Zigbee + Thread concurrently off a single multi-PAN
+RCP. Not achievable on the gateway's EFR32MG1B (Series 1). See
+[`cpcd-zigbeed-otbr/README.md`](./cpcd-zigbeed-otbr/README.md) for the
+full explanation and what to do instead.
 
-The file `z2m/configuration.yaml` contains:
+---
 
-```yaml
-serial:
-  port: tcp://cpcd-zigbeed:9999
-  adapter: ember
-
-mqtt:
-  server: mqtt://mosquitto:1883
-
-frontend:
-  port: 8080
-```
-
-These settings are pre-configured and should not need changes.
-
-## Commands
+## Commands Reference
 
 ```bash
-# Start everything
-docker compose up -d
+# Zigbee stack
+docker compose -f docker-compose-zigbee.yml up -d
+docker compose -f docker-compose-zigbee.yml down
+docker compose -f docker-compose-zigbee.yml logs -f cpcd-zigbeed
 
-# View logs (cpcd + zigbeed)
-docker compose logs -f cpcd-zigbeed
-
-# View logs (Zigbee2MQTT)
-docker compose logs -f zigbee2mqtt
-
-# Check health status
-docker compose ps
-
-# Restart after config change
-docker compose restart cpcd-zigbeed
-
-# Stop everything
-docker compose down
-
-# Full reset (deletes all Zigbee data!)
-docker compose down -v
+# Full reset (deletes all Zigbee data, Z2M database)
+docker compose -f docker-compose-zigbee.yml down -v
 ```
 
 ## Troubleshooting
 
 ### "Cannot reach RCP endpoint"
 
-The container can't connect to your gateway.
-
-1. Check the IP is correct in `docker-compose.yml`
+1. Check the IP is correct in the compose file
 2. Test connectivity: `nc -zv <gateway-ip> 8888`
-3. Ensure `serialgateway` is running on the gateway
+3. Check the in-kernel UART bridge is armed on the gateway:
+   `cat /sys/module/rtl8196e_uart_bridge/parameters/armed` → `1`
 
 ### "EZSP protocol version not supported"
 
-You're using an old version of Zigbee2MQTT.
-
-- This stack requires **Zigbee2MQTT 2.7.2 or newer** (for EZSP v18 support)
+Requires **Zigbee2MQTT 2.7.2 or newer** (for EZSP v18 support).
 
 ### "zigbeed entered FATAL state"
 
-zigbeed crashed. Check logs:
+Common causes: network instability (use Ethernet, not WiFi), or baudrate
+mismatch (must match RCP firmware, default 460800).
 
-```bash
-docker compose logs cpcd-zigbeed | grep -i error
-```
+---
 
-Common causes:
-- Network instability (use Ethernet, not WiFi)
-- Baudrate mismatch (must be 115200)
+## References
 
-### Zigbee2MQTT shows "Coordinator failed to start"
-
-Wait longer - the cpcd-zigbeed container must be healthy first (takes ~60s).
-
-```bash
-docker compose ps   # Check STATUS column
-```
-
-### Reset Zigbee Network
-
-To start fresh (removes all paired devices):
-
-```bash
-docker compose down
-docker volume rm docker_zigbeed_data docker_z2m_data
-docker compose up -d
-```
-
-## Building Locally
-
-To build the cpcd-zigbeed image yourself instead of using the pre-built one:
-
-1. Edit `docker-compose.yml`:
-   ```yaml
-   cpcd-zigbeed:
-     # image: ghcr.io/jnilo1/cpcd-zigbeed:latest
-     build:
-       context: ./cpcd-zigbeed
-       dockerfile: Dockerfile
-   ```
-
-2. Build and run:
-   ```bash
-   docker compose build cpcd-zigbeed
-   docker compose up -d
-   ```
-
-## Ports
-
-| Port | Service | Description |
-|------|---------|-------------|
-| 8080 | Zigbee2MQTT | Web interface |
-| 1883 | Mosquitto | MQTT broker |
-| 9001 | Mosquitto | MQTT WebSocket |
-
-## Data Persistence
-
-Data is stored in Docker volumes:
-
-| Volume | Contents |
-|--------|----------|
-| `zigbeed_data` | Zigbee network tokens and state |
-| `z2m_data` | Zigbee2MQTT database and settings |
-| `mosquitto_data` | MQTT retained messages |
-
-To backup: `docker compose down` then copy the volumes.
-
-To reset: `docker compose down -v` (deletes all data).
+- [cpc-daemon (Silabs)](https://github.com/SiliconLabs/cpc-daemon)
+- [zigbeed / EmberZNet](https://github.com/SiliconLabs/simplicity_sdk)
+- [Forum HACF thread](https://forum.hacf.fr/t/passerelle-lidl-silvercrest-firmware-open-source-zigbee-thread-pour-home-assistant/77310)

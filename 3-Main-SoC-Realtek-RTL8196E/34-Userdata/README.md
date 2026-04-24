@@ -29,7 +29,7 @@ Execute init scripts:
   S15hostname    → Set hostname, /etc/hosts
   S20time        → Sync time via NTP
   S30dropbear    → Start SSH server
-  S60serialgateway → Start Zigbee bridge (if radio mode = zigbee)
+  S50uart_bridge → Arm the in-kernel UART↔TCP bridge (skipped if radio mode = otbr)
   S70otbr        → Start Thread border router (if radio mode = otbr)
   S90checkpasswd → Warn if default password
 ```
@@ -55,14 +55,14 @@ Execute init scripts:
 │       ├── S15hostname
 │       ├── S20time
 │       ├── S30dropbear
-│       ├── S60serialgateway
+│       ├── S50uart_bridge
 │       ├── S70otbr
 │       └── S90checkpasswd
 ├── ssh/
 │   └── authorized_keys # SSH public keys for passwordless access
 ├── thread/             # Thread network credentials (created by otbr-agent)
 └── usr/
-    ├── bin/            # User applications (nano, serialgateway, otbr-agent, ot-ctl, boothold)
+    ├── bin/            # User applications (nano, otbr-agent, ot-ctl, boothold)
     └── share/
         └── terminfo/   # Terminal definitions (linux, vt100, vt102, xterm)
 ```
@@ -95,10 +95,10 @@ The gateway supports two radio modes, selected at flash time:
 
 | Mode | Config | Init script | EFR32 firmware | Use case |
 |------|--------|-------------|----------------|----------|
-| **Zigbee** (default) | no `radio.conf` | `S60serialgateway` | NCP or RCP+zigbeed | Zigbee2MQTT, ZHA |
+| **Zigbee** (default) | no `radio.conf` | `S50uart_bridge` | NCP or RCP+zigbeed | Zigbee2MQTT, ZHA |
 | **Thread** | `MODE=otbr` | `S70otbr` | OT-RCP | Matter, Home Assistant Thread |
 
-The mode is controlled by `/userdata/etc/radio.conf`. When set to Thread mode, `S60serialgateway` is skipped and `S70otbr` starts `otbr-agent` instead.
+The mode is controlled by `/userdata/etc/radio.conf`. When set to Thread mode, `S50uart_bridge` is skipped and `S70otbr` starts `otbr-agent` instead.
 
 See `ot-br-posix/README.md` for Thread-specific documentation.
 
@@ -118,13 +118,13 @@ rm /userdata/etc/radio.conf
 ./flash_efr32.sh <GATEWAY_IP>
 # Select [2] NCP-UART-HW
 
-# 4. Gateway reboots — serialgateway starts automatically
+# 4. Gateway reboots — in-kernel UART bridge arms automatically via S50uart_bridge
 ```
 
 **Zigbee → Thread:**
 ```bash
-# 1. Stop serialgateway
-/userdata/etc/init.d/S60serialgateway stop
+# 1. Disarm the in-kernel UART bridge (releases /dev/ttyS1 for otbr-agent)
+/userdata/etc/init.d/S50uart_bridge stop
 
 # 2. Set radio mode to Thread
 echo "MODE=otbr" > /userdata/etc/radio.conf
@@ -158,18 +158,18 @@ Dropbear is configured to read this file, enabling secure key-based authenticati
 |----------------|-------------|
 | `skeleton/` | Base structure for the user partition |
 | `nano/` | GNU nano text editor build |
-| `serialgateway/` | Zigbee serial gateway build |
 | `ot-br-posix/` | OpenThread Border Router build |
 | `build_userdata.sh` | Script to assemble and package the partition |
+
+The Zigbee UART↔TCP bridge is now in-kernel (`rtl8196e-uart-bridge`, part of
+the 6.18 kernel tree — see `../32-Kernel/files-6.18/drivers/net/rtl8196e-uart-bridge/`).
+No userspace component to build here.
 
 ## Building
 
 ```bash
 # Build nano (optional)
 cd nano && ./build_nano.sh && cd ..
-
-# Build serialgateway
-cd serialgateway && ./build_serialgateway.sh && cd ..
 
 # Build otbr-agent (optional, for Thread mode)
 cd ot-br-posix && ./build_otbr.sh && cd ..
@@ -201,26 +201,37 @@ If your terminal emulator uses a different type, you can add the corresponding t
 
 **Terminal size:** The `profile` automatically runs `resize` at login to detect the terminal dimensions. This ensures nano and other curses applications display at the correct size.
 
-### serialgateway
+### In-kernel UART↔TCP bridge (`rtl8196e-uart-bridge`)
 
-A lightweight serial-to-TCP bridge that exposes the Zigbee UART (`/dev/ttyS1`) over the network. This allows Zigbee2MQTT, Home Assistant ZHA, or other Zigbee coordinators to communicate with the Silabs EFR32 radio remotely.
+An in-kernel driver (6.18 kernel, `CONFIG_RTL8196E_UART_BRIDGE=y`)
+that exposes the Zigbee UART (`/dev/ttyS1`) over the network on
+TCP:8888. Replaces the former userspace `serialgateway` daemon from
+v3.0. Allows Zigbee2MQTT, Home Assistant ZHA, or other Zigbee
+coordinators to communicate with the Silabs EFR32 radio remotely.
 
-**Default configuration:**
-- Listens on TCP port **8888**
-- Connects to `/dev/ttyS1` at **115200** baud
-- Single client mode (new connection closes the previous one)
+**Default configuration (writable via sysfs, armed at boot by
+`S50uart_bridge`):**
 
-**Options:**
-| Option | Description |
-|--------|-------------|
-| `-p <port>` | TCP port to listen on (default: 8888) |
-| `-d <device>` | Serial device (default: /dev/ttyS1) |
-| `-b <baud>` | Baud rate (default: 115200) |
-| `-f` | Disable hardware flow control (default: enabled) |
-| `-D` | Stay in foreground (don't daemonize) |
-| `-q` | Quiet mode (suppress info messages) |
-| `-v` | Show version and exit |
-| `-h` | Show help |
+| sysfs param | Default | Description |
+|-------------|---------|-------------|
+| `tty` | `/dev/ttyS1` | TTY device path (root only) |
+| `baud` | `460800` via `BRIDGE_BAUD` in `/userdata/etc/radio.conf` | UART baud rate |
+| `port` | `8888` | TCP listen port (root only) |
+| `bind_addr` | `0.0.0.0` | TCP bind address (root only) |
+| `flow_control` | `1` | Hardware RTS/CTS (set `0` for EFR32 flash) |
+| `enable` | `0` → `1` by S50uart_bridge | 1=armed, 0=disarmed |
+| `armed` | read-only | Actual bridge state |
+| `stats` | read-only | Live rx/tx/drop counters |
+
+All under `/sys/module/rtl8196e_uart_bridge/parameters/`. Example:
+
+```bash
+# Change baud rate at runtime (no disarm needed)
+echo 230400 > /sys/module/rtl8196e_uart_bridge/parameters/baud
+
+# Read live counters
+cat /sys/module/rtl8196e_uart_bridge/parameters/stats
+```
 
 **Usage with Zigbee2MQTT:**
 ```yaml
@@ -232,6 +243,8 @@ serial:
 ```
 socket://<GATEWAY_IP>:8888
 ```
+
+Source: `../32-Kernel/files-6.18/drivers/net/rtl8196e-uart-bridge/`.
 
 ## Adding Custom terminfo
 

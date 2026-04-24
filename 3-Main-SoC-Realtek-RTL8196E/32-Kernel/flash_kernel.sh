@@ -4,19 +4,52 @@
 # The device must be in download mode (<RealTek> prompt) before running.
 # WARNING: Flashing the kernel triggers an automatic reboot.
 #
-# Usage: ./flash_kernel.sh [IP]
-#   IP - Target IP (default: 192.168.1.6)
+# Usage:
+#   ./flash_kernel.sh                         # flash kernel-6.18.img
+#   ./flash_kernel.sh -i <file>               # flash an explicit file
+#   ./flash_kernel.sh 192.168.1.6             # override target IP (positional)
+#
+# Options:
+#   -i, --image FILE    Explicit image filename (default: kernel-6.18.img)
 #
 # Environment variables (optional, for non-interactive use):
-#   CONFIRM=y  - Skip the "Proceed?" prompt
+#   CONFIRM=y              Skip the "Proceed?" prompt
 #
-# J. Nilo - December 2025
+# J. Nilo - December 2025, unified April 2026
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-TARGET_IP="${1:-192.168.1.6}"
-IMAGE="${SCRIPT_DIR}/kernel.img"
+
+# ── Argument parsing ──────────────────────────────────────────────────────
+
+IMAGE_OVERRIDE=""
+POS_ARGS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -i|--image)
+            IMAGE_OVERRIDE="$2"; shift 2 ;;
+        --image=*)
+            IMAGE_OVERRIDE="${1#*=}"; shift ;;
+        -h|--help)
+            sed -n '2,16p' "$0" | sed 's|^# \{0,1\}||'
+            exit 0 ;;
+        *)
+            POS_ARGS+=("$1"); shift ;;
+    esac
+done
+
+TARGET_IP="${POS_ARGS[0]:-192.168.1.6}"
+
+# Resolve image path
+if [ -n "$IMAGE_OVERRIDE" ]; then
+    case "$IMAGE_OVERRIDE" in
+        /*) IMAGE="$IMAGE_OVERRIDE" ;;
+        *)  IMAGE="${SCRIPT_DIR}/${IMAGE_OVERRIDE}" ;;
+    esac
+else
+    IMAGE="${SCRIPT_DIR}/kernel-6.18.img"
+fi
 
 # Check prerequisites
 tftp_usage="$(tftp --help 2>&1 || true)"
@@ -32,10 +65,12 @@ if ! command -v nc >/dev/null 2>&1; then
 fi
 
 if [ ! -f "$IMAGE" ]; then
-    echo "Error: kernel.img not found"
+    echo "Error: $(basename "$IMAGE") not found at ${IMAGE}"
     echo "Run ./build_kernel.sh first"
     exit 1
 fi
+
+IMAGE_BASENAME="$(basename "$IMAGE")"
 
 SIZE=$(stat -c%s "$IMAGE" 2>/dev/null || stat -f%z "$IMAGE")
 
@@ -76,13 +111,13 @@ if [ "${BOOTLOADER_CONFIRMED:-}" != "1" ]; then
 fi
 
 echo ""
-echo "Flashing kernel.img (${SIZE} bytes) to ${TARGET_IP}..."
+echo "Flashing ${IMAGE_BASENAME} (${SIZE} bytes) to ${TARGET_IP}..."
 echo ""
 if [ "${CONFIRM:-}" != "y" ]; then
     read -r -p "Proceed? [y/N] " confirm
     if [[ ! "$confirm" =~ ^[yY]$ ]]; then
         echo "Aborted."
-        echo "To flash manually: tftp -m binary ${TARGET_IP} -c put kernel.img"
+        echo "To flash manually: tftp -m binary ${TARGET_IP} -c put ${IMAGE_BASENAME}"
         exit 0
     fi
 fi
@@ -97,7 +132,7 @@ sleep 0.2
 
 echo "Uploading..."
 cd "$SCRIPT_DIR"
-out=$(timeout 30 tftp -m binary "$TARGET_IP" -c put kernel.img 2>&1) || true
+out=$(timeout 30 tftp -m binary "$TARGET_IP" -c put "$IMAGE_BASENAME" 2>&1) || true
 if echo "$out" | grep -qiE \
     "error|timeout|timed out|refused|failed|unknown host|access denied|disk full|illegal|not connected|unknown transfer"; then
     kill "$nc_pid" 2>/dev/null; wait "$nc_pid" 2>/dev/null; rm -f "$notify_file"

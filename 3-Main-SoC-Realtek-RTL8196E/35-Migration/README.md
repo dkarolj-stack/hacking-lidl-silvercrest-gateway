@@ -64,7 +64,7 @@ standalone.
 | Partition | Flash offset | Source | Header handling |
 |-----------|-------------|--------|-----------------|
 | boot+cfg | 0x000000 | `31-Bootloader/boot.bin` | Strip cvimg header |
-| kernel | 0x020000 | `32-Kernel/kernel.img` | Keep cs6c header |
+| kernel | 0x020000 | `32-Kernel/kernel-6.18.img` | Keep cs6c header |
 | rootfs | 0x200000 | `33-Rootfs/rootfs.bin` | Strip cvimg header |
 | userdata | 0x400000 | `34-Userdata/userdata.bin` | Strip cvimg header |
 
@@ -104,9 +104,9 @@ The gateway must be running with SSH access (custom firmware already installed).
 The script:
 1. Presents a firmware selection menu
 2. Installs `universal-silabs-flasher` in a venv if needed (auto-reinstalls if probe-methods patch changes)
-3. SSHes into the gateway to restart serialgateway in flash mode (retries up to 3 times)
+3. SSHes into the gateway to stop radio daemons and switch the in-kernel UART bridge to flash mode (`flow_control=0`, retries up to 3 times)
 4. Flashes the selected firmware via EZSP/Xmodem over `socket://IP:8888`
-5. Reboots the gateway
+5. Restores `flow_control=1` and reboots the gateway
 
 | Firmware | Location | Description |
 |----------|----------|-------------|
@@ -153,7 +153,7 @@ The script:
 ### EFR32 (OTA flash)
 
 - **SSH timeout** — the script retries 3 times; check gateway is reachable
-- **USF probe fails** — serialgateway may not be in flash mode; reboot and retry
+- **USF probe fails** — check `cat /sys/module/rtl8196e_uart_bridge/parameters/flow_control` on the gateway (should be `0` during flash); reboot and retry
 - **No progress bar** — only happens when flashing the bootloader (output is captured for error detection)
 
 ## Rollback

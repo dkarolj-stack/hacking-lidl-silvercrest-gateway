@@ -146,7 +146,7 @@ echo "[3/5] Applying configuration..."
 if [ -d "config" ]; then
     cp "${PATCHES_DIR}/sl_cpc_drv_uart_usart_vcom_config.h" config/ 2>/dev/null || true
     cp "${PATCHES_DIR}/sl_cpc_security_config.h" config/ 2>/dev/null || true
-    echo "  - Copied UART config (115200 baud, HW flow control, PA0/PA1/PA4/PA5)"
+    echo "  - Copied UART config (460800 baud, HW flow control, PA0/PA1/PA4/PA5)"
     echo "  - Copied security config (CPC security disabled)"
 fi
 

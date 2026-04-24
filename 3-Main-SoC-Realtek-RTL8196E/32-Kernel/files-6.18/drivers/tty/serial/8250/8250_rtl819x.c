@@ -1,0 +1,449 @@
+// SPDX-License-Identifier: GPL-2.0+
+/*
+ * Realtek RTL8196E UART1 glue driver for 8250 core.
+ *
+ * This driver is specifically for UART1 (0x18002100) which requires hardware
+ * flow control for communication with the EFR32 Zigbee NCP. UART0 (0x18002000)
+ * uses the standard ns16550a driver and serves as the system console.
+ *
+ * Manages the SoC-specific flow control register (bit 29 @ 0x18002110) needed
+ * for reliable RTS/CTS operation - setting CRTSCTS in termios alone is not
+ * sufficient on this SoC. Also forces registration as ttyS1 to avoid stealing
+ * the console (ttyS0) from UART0.
+ *
+ * Copyright (C) 2025 Jacques Nilo
+ */
+
+#include <linux/device.h>
+#include <linux/io.h>
+#include <linux/module.h>
+#include <linux/serial_8250.h>
+#include <linux/serial_core.h>
+#include <linux/serial_reg.h>
+#include <linux/platform_device.h>
+#include <linux/of.h>
+#include <linux/of_device.h>
+#include <linux/of_irq.h>
+#include <linux/of_platform.h>
+#include <linux/clk.h>
+#include <linux/mfd/syscon.h>
+#include <linux/regmap.h>
+
+#include "8250.h"
+
+#define DRV_NAME    "8250_rtl819x"
+#define DRV_VERSION "1.0"
+
+/*
+ * RTL8196E UART Flow Control Register
+ * Physical address: 0x18002110 == UART1 base (0x18002100) + 0x10 == MCR
+ *                   with regshift=2 (reg 4 << 2).
+ *
+ * This 32-bit word at 0x18002110 is the MCR register seen through the
+ * big-endian byte-lane routing of the SoC bus: writeb() by the 8250
+ * core lands in bits 31:24 (the MCR byte), and bit 29 of the 32-bit
+ * word is UART_MCR_AFE (bit 5 of the MCR byte). Our readl/writel RMW
+ * preserves DTR/RTS/OUT2 (bits 24/25/27) that the core writes.
+ *
+ * Validated on hardware (2026-04-23) via devmem cycles:
+ *   - boot:             0x2B000000 (DTR|RTS|OUT2|AFE)
+ *   - stty -crtscts:    0x0B000000 (AFE cleared by core writeb)
+ *   - stty crtscts:     0x2B000000 (AFE restored by our set_termios)
+ *
+ * Bit 29: Hardware Flow Control Enable (MCR_AFE alias)
+ *   0 = Disabled (default) - causes UART overruns
+ *   1 = Enabled - proper RTS/CTS operation
+ */
+#define RTL8196E_UART_FLOW_CTRL_OFFSET		0x10	/* reg 4 (MCR) << regshift=2 */
+#define RTL8196E_UART_FLOW_CTRL_BIT		BIT(29)
+
+/*
+ * PIN_MUX_SEL register (offset 0x40 in system controller).
+ * Bits 1, 3, 6 must be set for UART1 TXD/RXD signals to reach the
+ * physical pins.  Without this, the UART peripheral works internally
+ * (THRE fires, DMA runs) but no electrical signal reaches the EFR32.
+ */
+#define RTL8196E_PIN_MUX_UART1_BITS		(BIT(1) | BIT(3) | BIT(6))
+
+/*
+ * RX FIFO trigger level.  Higher = fewer IRQs (less CPU overhead), lower =
+ * better latency.  R_TRIG_10 (trigger at 8/16 bytes) is a reasonable default
+ * for short EZSP/ASH frames over the EFR32 NCP link.
+ * Candidates for benchmarking: UART_FCR_R_TRIG_01 (4), _10 (8), _11 (14).
+ */
+#define RTL8196E_UART_FCR	(UART_FCR_ENABLE_FIFO | UART_FCR_R_TRIG_10)
+
+/**
+ * struct rtl8196e_uart_data - Private data for RTL8196E UART
+ * @line: UART line number assigned by serial core
+ * @clk: Optional clock for UART
+ * @flow_ctrl_base: Virtual address of flow control register
+ * @supports_afe: True if auto-flow-control is enabled in DT
+ */
+struct rtl8196e_uart_data {
+	int line;
+	struct clk *clk;
+	void __iomem *flow_ctrl_base;
+	bool supports_afe;
+	struct device *dev;
+};
+
+/**
+ * rtl8196e_uart_enable_flow_control() - Enable hardware flow control
+ * @data: RTL8196E UART private data
+ *
+ * Configures the RTL8196E-specific hardware flow control register.
+ * This is REQUIRED for proper RTS/CTS operation - setting CRTSCTS
+ * in termios alone is not sufficient on this SoC.
+ */
+static void rtl8196e_uart_enable_flow_control(struct rtl8196e_uart_data *data)
+{
+	u32 reg_val;
+
+	if (!data->flow_ctrl_base) {
+		dev_warn(data->dev, "flow control register not mapped\n");
+		return;
+	}
+
+	reg_val = readl(data->flow_ctrl_base);
+
+	if (reg_val & RTL8196E_UART_FLOW_CTRL_BIT) {
+		dev_dbg(data->dev, "HW flow control already enabled (0x%08x)\n",
+			reg_val);
+		return;
+	}
+
+	/* Enable hardware flow control */
+	reg_val |= RTL8196E_UART_FLOW_CTRL_BIT;
+	writel(reg_val, data->flow_ctrl_base);
+
+	/* Read back to verify */
+	reg_val = readl(data->flow_ctrl_base);
+	if (reg_val & RTL8196E_UART_FLOW_CTRL_BIT) {
+		dev_dbg(data->dev, "HW flow control enabled (reg=0x%08x)\n",
+			reg_val);
+	} else {
+		dev_err(data->dev, "Failed to enable HW flow control!\n");
+	}
+}
+
+/**
+ * rtl8196e_uart_disable_flow_control() - Disable hardware flow control
+ * @data: RTL8196E UART private data
+ *
+ * Disables the RTL8196E-specific hardware flow control register.
+ * Called when CRTSCTS is removed from termios.
+ */
+static void rtl8196e_uart_disable_flow_control(struct rtl8196e_uart_data *data)
+{
+	u32 reg_val;
+
+	if (!data->flow_ctrl_base) {
+		dev_warn(data->dev, "flow control register not mapped\n");
+		return;
+	}
+
+	reg_val = readl(data->flow_ctrl_base);
+
+	if (!(reg_val & RTL8196E_UART_FLOW_CTRL_BIT)) {
+		dev_dbg(data->dev, "HW flow control already disabled (0x%08x)\n",
+			reg_val);
+		return;
+	}
+
+	/* Disable hardware flow control */
+	reg_val &= ~RTL8196E_UART_FLOW_CTRL_BIT;
+	writel(reg_val, data->flow_ctrl_base);
+
+	/* Read back to verify */
+	reg_val = readl(data->flow_ctrl_base);
+	if (!(reg_val & RTL8196E_UART_FLOW_CTRL_BIT)) {
+		dev_dbg(data->dev, "HW flow control disabled (reg=0x%08x)\n",
+			reg_val);
+	} else {
+		dev_err(data->dev, "Failed to disable HW flow control!\n");
+	}
+}
+
+/**
+ * rtl8196e_uart_set_divisor() - Custom divisor programmer
+ * @port: UART port
+ * @baud: target baud rate
+ * @quot: divisor computed by the 8250 core (clock / (16 * baud))
+ * @quot_frac: fractional divisor (unused on this SoC)
+ *
+ * The RTL8196E UART interprets the value written to DLL/DLM as (N + 1),
+ * not N like a textbook 16550A. Evidence:
+ *   - The stock Realtek bootloader uses `divisor = clock/16/baud - 1`
+ *     (see 31-Bootloader/boot/uart.c).
+ *   - Leaving it alone produces usable baud at 115200/230400 (error
+ *     <1.4%, within tolerance) but catastrophic ~3% error at 460800,
+ *     manifesting as ~40% framing errors on the wire.
+ *   - Programming `quot - 1` restores a 0.47% error at 460800 and
+ *     matches what the RTL hardware actually emits — verified live by
+ *     arming the bridge at a fake baud such that the unpatched core
+ *     programmed quot-1 and observing FE=0.
+ *
+ * Compensate by programming (quot - 1) so the hardware ends up at the
+ * requested baud rate.
+ */
+static void rtl8196e_uart_set_divisor(struct uart_port *port, unsigned int baud,
+				      unsigned int quot, unsigned int quot_frac)
+{
+	unsigned int adjusted = quot > 1 ? quot - 1 : quot;
+
+	(void)quot_frac;
+	serial8250_do_set_divisor(port, baud, adjusted);
+}
+
+/**
+ * rtl8196e_uart_set_termios() - Custom set_termios handler
+ * @port: UART port
+ * @termios: New termios settings
+ * @old: Old termios settings
+ *
+ * This function is called whenever termios settings change (via tcsetattr/stty).
+ * It monitors the CRTSCTS flag and synchronizes the RTL8196E hardware flow
+ * control register (bit 29) accordingly.
+ */
+static void rtl8196e_uart_set_termios(struct uart_port *port,
+				      struct ktermios *termios,
+				      const struct ktermios *old)
+{
+	struct rtl8196e_uart_data *data = port->private_data;
+	bool crtscts_new, crtscts_old;
+
+	/*
+	 * Let the 8250 core program baud/LCR/AFE; we only mirror the SoC
+	 * flow-control gate (bit 29) after this.
+	 */
+	serial8250_do_set_termios(port, termios, old);
+
+	/* Only manage HW flow control if AFE is supported */
+	if (!data || !data->supports_afe)
+		return;
+
+	/* Check if CRTSCTS flag changed */
+	crtscts_new = termios->c_cflag & CRTSCTS;
+	crtscts_old = old ? (old->c_cflag & CRTSCTS) : false;
+
+	if (crtscts_new == crtscts_old)
+		return; /* No change, nothing to do */
+
+	/* Synchronize SoC flow-control gate with CRTSCTS */
+	if (crtscts_new) {
+		dev_dbg(data->dev, "CRTSCTS enabled, activating HW flow control\n");
+		rtl8196e_uart_enable_flow_control(data);
+	} else {
+		dev_dbg(data->dev, "CRTSCTS disabled, deactivating HW flow control\n");
+		rtl8196e_uart_disable_flow_control(data);
+	}
+}
+
+/**
+ * rtl8196e_uart_probe() - Probe and initialize RTL8196E UART
+ * @pdev: Platform device
+ *
+ * Initializes the UART port and configures RTL8196E-specific features.
+ *
+ * Return: 0 on success, negative error code on failure
+ */
+static int rtl8196e_uart_probe(struct platform_device *pdev)
+{
+	struct uart_8250_port uart = {};
+	struct rtl8196e_uart_data *data;
+	struct resource *regs;
+	int ret;
+
+	data = devm_kzalloc(&pdev->dev, sizeof(*data), GFP_KERNEL);
+	if (!data)
+		return -ENOMEM;
+	data->dev = &pdev->dev;
+
+	/* Request + ioremap UART register window. Also populates @regs so we
+	 * can set uart.port.mapbase below. The request_mem_region side of
+	 * this helper gives us a proper /proc/iomem entry and conflict
+	 * detection, which devm_ioremap alone would not.
+	 */
+	uart.port.membase = devm_platform_get_and_ioremap_resource(pdev, 0, &regs);
+	if (IS_ERR(uart.port.membase)) {
+		ret = PTR_ERR(uart.port.membase);
+		dev_err(&pdev->dev, "Failed to map UART registers: %d\n", ret);
+		return ret;
+	}
+
+	/* flow_ctrl_base is an alias on MCR; assigned after struct init below */
+
+	/* Ensure UART1 pins are muxed to the UART peripheral via syscon */
+	{
+		struct regmap *syscon;
+
+		syscon = syscon_regmap_lookup_by_phandle(pdev->dev.of_node,
+							 "realtek,syscon");
+		if (IS_ERR(syscon)) {
+			ret = PTR_ERR(syscon);
+			if (ret == -EPROBE_DEFER)
+				return ret;
+			dev_warn(&pdev->dev,
+				 "syscon lookup failed (%d), UART1 pins may not be muxed\n",
+				 ret);
+		} else {
+			ret = regmap_update_bits(syscon, 0x40,
+						 RTL8196E_PIN_MUX_UART1_BITS,
+						 RTL8196E_PIN_MUX_UART1_BITS);
+			if (ret) {
+				dev_err(&pdev->dev, "pin mux write failed: %d\n", ret);
+				return ret;
+			}
+		}
+	}
+
+	/* Optional: Get clock if specified in DT */
+	data->clk = devm_clk_get_optional(&pdev->dev, NULL);
+	if (IS_ERR(data->clk))
+		return PTR_ERR(data->clk);
+	if (data->clk) {
+		ret = clk_prepare_enable(data->clk);
+		if (ret) {
+			dev_err(&pdev->dev, "Failed to enable clock: %d\n", ret);
+			return ret;
+		}
+	}
+
+	/* Initialize uart_8250_port structure */
+	uart.port.dev = &pdev->dev;
+	uart.port.type = PORT_16550A;
+	uart.port.iotype = UPIO_MEM;
+	uart.port.mapbase = regs->start;
+	uart.port.regshift = 2;  /* 32-bit aligned registers on 8196E */
+	uart.port.private_data = data;
+
+	/* Install custom set_termios handler for dynamic flow control */
+	uart.port.set_termios = rtl8196e_uart_set_termios;
+
+	/* Install custom divisor programmer (compensates for the RTL's N+1 quirk) */
+	uart.port.set_divisor = rtl8196e_uart_set_divisor;
+
+	/* Get IRQ from device tree */
+	ret = platform_get_irq(pdev, 0);
+	if (ret < 0) {
+		dev_err(&pdev->dev, "Failed to get IRQ: %d\n", ret);
+		goto err_clk_disable;
+	}
+	uart.port.irq = ret;
+
+	/* Get clock frequency: DT property > clock framework > 200 MHz fallback */
+	if (of_property_read_u32(pdev->dev.of_node, "clock-frequency",
+				 &uart.port.uartclk)) {
+		if (data->clk)
+			uart.port.uartclk = clk_get_rate(data->clk);
+		if (!uart.port.uartclk) {
+			uart.port.uartclk = 200000000;
+			dev_info(&pdev->dev, "uartclk: %u Hz (fallback)\n",
+				 uart.port.uartclk);
+		} else {
+			dev_info(&pdev->dev, "uartclk: %u Hz (clock framework)\n",
+				 uart.port.uartclk);
+		}
+	}
+
+	/* flow_ctrl_base aliases MCR (see header comment). membase was set
+	 * earlier by devm_platform_get_and_ioremap_resource.
+	 */
+	data->flow_ctrl_base = uart.port.membase + RTL8196E_UART_FLOW_CTRL_OFFSET;
+
+	/* Set UART capabilities */
+	uart.capabilities = UART_CAP_FIFO;
+
+	/* Enable AFE (Automatic Flow Control) if requested in DT */
+	if (of_property_read_bool(pdev->dev.of_node, "auto-flow-control") ||
+	    of_property_read_bool(pdev->dev.of_node, "uart-has-rtscts")) {
+		uart.capabilities |= UART_CAP_AFE;
+		data->supports_afe = true;
+		/* Enable hardware flow control register (will be managed dynamically) */
+		rtl8196e_uart_enable_flow_control(data);
+	} else {
+		data->supports_afe = false;
+	}
+
+	/* Configure FIFO */
+	uart.port.fifosize = 16;
+	uart.tx_loadsz = 16;
+	uart.fcr = RTL8196E_UART_FCR;
+
+	/* Set port flags */
+	uart.port.flags = UPF_FIXED_PORT | UPF_FIXED_TYPE;
+
+	/* Force line 1 (ttyS1) to not steal ttyS0 from console uart0 */
+	uart.port.line = 1;
+
+	/* Register the port with 8250 subsystem */
+	ret = serial8250_register_8250_port(&uart);
+	if (ret < 0) {
+		dev_err(&pdev->dev, "Failed to register 8250 port: %d\n", ret);
+		goto err_clk_disable;
+	}
+
+	data->line = ret;
+	if (ret != 1)
+		dev_warn(&pdev->dev, "registered as ttyS%d, expected ttyS1\n", ret);
+
+	/* Re-assert flow control after register_8250_port to cover any MCR
+	 * writes performed by the core during port setup. */
+	if (data->supports_afe)
+		rtl8196e_uart_enable_flow_control(data);
+
+	platform_set_drvdata(pdev, data);
+
+	dev_info(&pdev->dev, "8250_rtl819x v" DRV_VERSION " (J. Nilo)\n");
+	dev_info(&pdev->dev, "ttyS%d @ %u baud-clk, IRQ %d, FIFO %d, AFE %s\n",
+		 data->line, uart.port.uartclk, uart.port.irq,
+		 uart.port.fifosize, data->supports_afe ? "on" : "off");
+
+	return 0;
+
+err_clk_disable:
+	if (data->clk)
+		clk_disable_unprepare(data->clk);
+	return ret;
+}
+
+/**
+ * rtl8196e_uart_remove() - Remove RTL8196E UART
+ * @pdev: Platform device
+ *
+ * Return: 0 on success
+ */
+static void rtl8196e_uart_remove(struct platform_device *pdev)
+{
+	struct rtl8196e_uart_data *data = platform_get_drvdata(pdev);
+
+	serial8250_unregister_port(data->line);
+
+	if (data->clk)
+		clk_disable_unprepare(data->clk);
+}
+
+/* Device tree match table */
+static const struct of_device_id rtl8196e_uart_of_match[] = {
+	{ .compatible = "realtek,rtl8196e-uart" },
+	{ /* sentinel */ }
+};
+MODULE_DEVICE_TABLE(of, rtl8196e_uart_of_match);
+
+/* Platform driver structure */
+static struct platform_driver rtl8196e_uart_driver = {
+	.probe = rtl8196e_uart_probe,
+	.remove = rtl8196e_uart_remove,
+	.driver = {
+		.name = "rtl8196e-uart",
+		.of_match_table = rtl8196e_uart_of_match,
+	},
+};
+
+module_platform_driver(rtl8196e_uart_driver);
+
+MODULE_AUTHOR("Jacques Nilo");
+MODULE_DESCRIPTION("Realtek RTL8196E UART driver with hardware flow control");
+MODULE_VERSION(DRV_VERSION);
+MODULE_LICENSE("GPL");

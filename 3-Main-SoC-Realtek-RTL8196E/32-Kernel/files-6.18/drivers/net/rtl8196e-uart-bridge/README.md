@@ -1,0 +1,148 @@
+# rtl8196e-uart-bridge
+
+In-kernel UART ↔ TCP byte shoveler for the Realtek RTL8196E / Lexra
+RLX4181 gateway. Replaces the former userspace `serialgateway` daemon.
+
+## What it does
+
+Bridges `/dev/ttyS1` (Silabs EFR32 Zigbee/Thread radio) to a TCP listen
+socket (default `:8888`). A single client connects, and the driver
+shovels bytes in both directions from inside the kernel:
+
+```
+                 +-------------------+
+EFR32 radio <--> | UART1 (ttyS1)     |
+                 |   |               |
+                 |   | tty_port      |     rtl8196e-uart-bridge
+                 |   | client_ops    |     (in-kernel hot path,
+                 |   v               |      no ldisc, no userspace)
+                 | TCP listen :8888  | <---> Z2M / cpcd / zigbeed / etc.
+                 +-------------------+
+```
+
+No line discipline, no context switches on the hot path, no userspace
+copy. The result is a clean up to 892857 baud (200 MHz ÷ 16 ÷ 14 — the N+1
+divisor max for this SoC) with zero overrun under load.
+
+Why a kernel module at all — and why the tty_port client_ops path
+rather than a line discipline — is documented in [`DESIGN.md`](DESIGN.md).
+
+## Sysfs interface
+
+Exposed under `/sys/module/rtl8196e_uart_bridge/parameters/`. All knobs
+are live: writing flips the running bridge without reload.
+
+| File | R/W | Meaning |
+|---|---|---|
+| `tty` | rw, root | tty device path. Default `/dev/ttyS1` |
+| `baud` | rw | UART baud. Applied live; take care matching EFR32 firmware |
+| `port` | rw, root | TCP listen port. Default `8888` |
+| `bind_addr` | rw, root | TCP bind address. Default `0.0.0.0`; set `127.0.0.1` for loopback-only |
+| `flow_control` | rw | 1 = CRTSCTS (normal), 0 = off (needed during EFR32 flash) |
+| `enable` | rw | 1 = arm the bridge, 0 = disarm. Boot default 0 |
+| `armed` | ro | 1 when both UART and listen socket are live |
+| `stats` | ro | `rx=... tx=... drops_nocli=... drops_err=... drops_tx=...` |
+| `status_led_brightness` | rw | 0-255 value fired on the `uart-bridge-client` LED trigger when a client connects (default 255; cleared on disconnect) |
+
+Example — arm the bridge manually at 115200 on loopback:
+
+```sh
+SYSFS=/sys/module/rtl8196e_uart_bridge/parameters
+echo 115200 > $SYSFS/baud
+echo 127.0.0.1 > $SYSFS/bind_addr
+echo 1 > $SYSFS/enable
+cat $SYSFS/armed      # 1
+```
+
+The module loads at boot with `enable=0` and does nothing until something
+(typically the init script below) arms it. This avoids racing the 8250
+probe that creates `/dev/ttyS1`.
+
+## Boot / runtime integration
+
+The userdata init script `S50uart_bridge`
+(`3-Main-SoC-Realtek-RTL8196E/34-Userdata/skeleton/etc/init.d/S50uart_bridge`)
+is the normal entry point. It reads `/userdata/etc/radio.conf`:
+
+```
+BRIDGE_BAUD=115200   # or 460800, 691200, 892857 — match the EFR32 firmware
+BRIDGE_BIND=0.0.0.0  # or 127.0.0.1 to force SSH-tunnel-only access
+```
+
+then writes the corresponding sysfs knobs and flips `enable=1`. When
+`MODE=otbr` is set in the same file, the script exits early and leaves
+the UART free for `otbr-agent`.
+
+Both keys are optional — missing `BRIDGE_BAUD` defaults to 460800,
+missing `BRIDGE_BIND` defaults to 0.0.0.0 (unchanged from v3.0
+behaviour).
+
+## Stats and observability
+
+`/sys/module/rtl8196e_uart_bridge/parameters/stats` tracks five counters:
+
+- `rx` — bytes forwarded UART → TCP (radio → host)
+- `tx` — bytes forwarded TCP → UART (host → radio)
+- `drops_nocli` — UART bytes dropped because no TCP client is connected
+- `drops_err` — UART bytes dropped because `kernel_sendmsg()` failed
+- `drops_tx` — TCP bytes dropped because the tty->write was short
+
+Non-zero `drops_err` or `drops_tx` in steady state points to TCP
+backpressure or tty congestion, respectively. `drops_nocli` is normal
+any time Z2M (or whichever client) is not connected.
+
+Combined with the 8250 framing/overrun counters in
+`/proc/tty/driver/serial` you get a complete picture of both the
+wire and the bridge.
+
+## STATUS LED — client connected indicator
+
+When a TCP client is connected the bridge fires the
+`uart-bridge-client` LED trigger at the configured brightness; it
+clears the trigger on disconnect. This reproduces the pre-v3.0
+serialgateway behaviour where the STATUS LED tracked "Zigbee host
+connected".
+
+Bind the trigger to the physical LED once (done by `S50uart_bridge`
+at boot based on `eth0/led_mode`):
+
+```sh
+echo uart-bridge-client > /sys/class/leds/status/trigger
+echo 255 > /sys/module/rtl8196e_uart_bridge/parameters/status_led_brightness
+```
+
+Set `status_led_brightness` to 0 to disable the LED behaviour without
+touching the trigger wiring.
+
+## Flashing the EFR32 with the bridge armed
+
+`flash_efr32.sh` (at the repo root) talks to the bridge directly and
+handles the EFR32 firmware flash without disarming it. It flips
+`flow_control` to 0 for the Gecko Bootloader Xmodem transfer and
+restores it to 1 afterwards. No manual teardown required.
+
+## Security
+
+The bridge is a plaintext single-client TCP listener. Any host that can
+reach `gateway:8888` can talk EZSP/CPC/Spinel directly to the Zigbee
+radio with no authentication. For anything beyond a fully-trusted LAN,
+set `BRIDGE_BIND=127.0.0.1` and reach the bridge through an SSH tunnel
+from the host running Z2M/cpcd/otbr.
+
+Full threat model, gateway-side hardening, `autossh` + systemd recipe,
+and verification steps: [`SECURITY.md`](SECURITY.md).
+
+## Files in this directory
+
+| File | Role |
+|---|---|
+| `rtl8196e_uart_bridge_main.c` | driver source (~1000 lines, single file) |
+| `Kconfig` / `Makefile` | in-tree build glue |
+| `README.md` | this file |
+| `DESIGN.md` | rationale + design notes (what was built and why) |
+| `SECURITY.md` | SSH-tunnel deployment and threat model |
+
+The driver header comment in `rtl8196e_uart_bridge_main.c:1-26` is the
+authoritative reference for the sysfs knobs and their runtime semantics
+— anything in this README that drifts from it should be treated as a
+documentation bug.

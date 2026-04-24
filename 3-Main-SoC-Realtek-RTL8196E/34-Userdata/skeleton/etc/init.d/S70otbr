@@ -17,7 +17,7 @@
 OTBR_BIN="/userdata/usr/bin/otbr-agent"
 
 # UART settings — must match EFR32 OT-RCP firmware
-RCP_URL="spinel+hdlc+uart:///dev/ttyS1?uart-baudrate=115200"
+RCP_URL="spinel+hdlc+uart:///dev/ttyS1?uart-baudrate=460800"
 
 # Network interfaces
 THREAD_IF="wpan0"

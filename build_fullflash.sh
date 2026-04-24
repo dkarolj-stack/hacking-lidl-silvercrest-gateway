@@ -29,7 +29,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RTL_DIR="${SCRIPT_DIR}/3-Main-SoC-Realtek-RTL8196E"
 
 BOOTLOADER_IMG="${RTL_DIR}/31-Bootloader/boot.bin"
-KERNEL_IMG="${RTL_DIR}/32-Kernel/kernel.img"
+KERNEL_IMG="${RTL_DIR}/32-Kernel/kernel-6.18.img"
 ROOTFS_IMG="${RTL_DIR}/33-Rootfs/rootfs.bin"
 USERDATA_DIR="${RTL_DIR}/34-Userdata"
 USERDATA_IMG="${USERDATA_DIR}/userdata.bin"
@@ -204,7 +204,7 @@ userdata_max=$((FLASH_SIZE - OFF_USERDATA)) # 12288 KiB
 
 log "Image sizes (data written to flash):"
 log "  boot.bin:     $(numfmt --to=iec-i --suffix=B $boot_data) / $(numfmt --to=iec-i --suffix=B $boot_max)"
-log "  kernel.img:   $(numfmt --to=iec-i --suffix=B $kernel_data) / $(numfmt --to=iec-i --suffix=B $kernel_max) (with cs6c header)"
+log "  kernel-6.18.img: $(numfmt --to=iec-i --suffix=B $kernel_data) / $(numfmt --to=iec-i --suffix=B $kernel_max) (with cs6c header)"
 log "  rootfs.bin:   $(numfmt --to=iec-i --suffix=B $rootfs_data) / $(numfmt --to=iec-i --suffix=B $rootfs_max)"
 log "  userdata.bin: $(numfmt --to=iec-i --suffix=B $userdata_data) / $(numfmt --to=iec-i --suffix=B $userdata_max)"
 log ""
@@ -215,7 +215,7 @@ if [ $boot_data -gt $boot_max ]; then
     OVERFLOW=1
 fi
 if [ $kernel_data -gt $kernel_max ]; then
-    echo "Error: kernel.img ($kernel_data) exceeds kernel partition ($kernel_max)" >&2
+    echo "Error: kernel-6.18.img ($kernel_data) exceeds kernel partition ($kernel_max)" >&2
     OVERFLOW=1
 fi
 if [ $rootfs_data -gt $rootfs_max ]; then

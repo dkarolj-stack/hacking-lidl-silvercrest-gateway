@@ -34,7 +34,7 @@ Pre-built firmware is available in the `firmware/` directory. From the repositor
 # Select [2] NCP-UART-HW
 ```
 
-The script handles everything (serialgateway restart, flash, reboot).
+The script handles everything (switch in-kernel UART bridge to flash mode, flash, reboot).
 
 > **Need other formats (.s37, .hex, .bin)?** Build from source (Option 2), they will be in `build/debug/`.
 
@@ -106,14 +106,15 @@ commander flash firmware/ncp-uart-hw.gbl \
 +-------------------+    UART     +-------------------+   Ethernet   +---------------------+
 |  EFR32MG1B (NCP)  |   115200    |  RTL8196E         |    TCP/IP    |  Host (x86/ARM)     |
 |                   |    baud     |  (Gateway SoC)    |              |                     |
-|  EmberZNet Stack  |<----------->|                   |<------------>|  Zigbee2MQTT        |
-|  + EZSP Protocol  |   ttyS1     |  serialgateway    |   port 8888  |       or            |
-|                   |             |  (serial->TCP)    |              |  Home Assistant ZHA |
-|  HW Flow Control  |             |                   |              |                     |
+|  EmberZNet Stack  |<----------->|  in-kernel        |<------------>|  Zigbee2MQTT        |
+|  + EZSP Protocol  |   ttyS1     |  UART<->TCP bridge|   port 8888  |       or            |
+|                   |             |  (rtl8196e-uart-  |              |  Home Assistant ZHA |
+|  HW Flow Control  |             |   bridge)         |              |                     |
 +-------------------+             +-------------------+              +---------------------+
 ```
 
-The RTL8196E runs `serialgateway` to bridge the EFR32's UART to TCP port 8888.
+The RTL8196E kernel bridges the EFR32's UART to TCP:8888 via the in-kernel
+`rtl8196e-uart-bridge` driver (replaces the former `serialgateway` daemon).
 See [34-Userdata](../../3-Main-SoC-Realtek-RTL8196E/34-Userdata/README.md) for gateway setup.
 
 ### Zigbee2MQTT Configuration
@@ -131,15 +132,18 @@ serial:
 Add integration with:
 - **Serial port path:** `socket://192.168.1.88:8888`
 
-> **Note:** Baudrate and flow control are handled by `serialgateway` on the gateway side, not by the client application.
+> **Note:** Baudrate and flow control are handled by the in-kernel UART
+> bridge on the gateway side, not by the client application. Change the
+> rate via `echo <baud> > /sys/module/rtl8196e_uart_bridge/parameters/baud`.
 
 ---
 
 ## Customization
 
-> **UART baud rate:** Only **115200** (default) and **230400** are reliable on
-> this gateway. 460800+ causes UART overruns due to the 16-byte FIFO and
-> userspace latency. See [25-RCP-UART-HW](../25-RCP-UART-HW/README.md#baudrate-and-network-considerations) for details.
+> **UART baud rate:** Default is **115200**. With the in-kernel UART
+> bridge on kernel 6.18, rates up to **892857** are supported (460800,
+> 691200, 892857 tested). See
+> [25-RCP-UART-HW](../25-RCP-UART-HW/README.md#baudrate-and-network-considerations) for details.
 
 The build process applies patches to optimize the firmware for the Lidl Gateway. See [patches/README.md](https://github.com/jnilo1/hacking-lidl-silvercrest-gateway/blob/main/2-Zigbee-Radio-Silabs-EFR32/24-NCP-UART-HW/patches/README.md) for details.
 
@@ -204,14 +208,17 @@ To fit in 256KB flash, the following were removed:
 ### No response from NCP
 
 1. Verify TCP connection: `nc -zv <gateway-ip> 8888`
-2. Check baud rate matches (115200) on firmware and serialgateway
-3. Verify hardware flow control is enabled on serialgateway
+2. Check baud rate matches (115200) on firmware side and on the gateway
+   (`cat /sys/module/rtl8196e_uart_bridge/parameters/baud`)
+3. Verify hardware flow control is on:
+   `cat /sys/module/rtl8196e_uart_bridge/parameters/flow_control` → `1`
 
 ### EZSP communication errors
 
 1. Ensure Z2M/ZHA is configured for `ember` adapter
 2. Check for EZSP version mismatch (this firmware is EZSP v13)
-3. Restart serialgateway with hardware flow control: `serialgateway` (not `-f`)
+3. Re-enable hardware flow control if left off by a failed flash:
+   `echo 1 > /sys/module/rtl8196e_uart_bridge/parameters/flow_control`
 
 ### Device won't pair
 

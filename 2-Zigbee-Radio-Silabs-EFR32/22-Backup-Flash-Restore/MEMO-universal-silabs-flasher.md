@@ -8,29 +8,31 @@ why baud rate recovery is tricky over TCP, and how `flash_efr32.sh` solves it.
 ## 1. How USF Works Over TCP
 
 USF connects to the EFR32 via `socket://192.168.1.88:8888`. This TCP socket
-is bridged to the EFR32's UART by `serialgateway` running on the gateway's
-RTL8196E CPU.
+is bridged to the EFR32's UART by the in-kernel `rtl8196e-uart-bridge`
+driver on the gateway's RTL8196E CPU (kernel 6.18; replaces the former
+userspace `serialgateway` daemon from v3.0).
 
 **Critical insight: over `socket://`, USF's baud rate parameter is ignored.**
 The Python serial transport (pyserial-asyncio) discards baud rate settings for
-TCP connections. The actual UART speed is controlled entirely by
-`serialgateway -b <baud>` on the gateway.
+TCP connections. The actual UART speed is controlled entirely by the bridge's
+sysfs `baud` parameter on the gateway
+(`/sys/module/rtl8196e_uart_bridge/parameters/baud`).
 
 ```
-USF (PC)                    serialgateway (gateway)           EFR32
-─────────                   ──────────────────────            ─────
+USF (PC)                    kernel UART bridge (gateway)      EFR32
+─────────                   ────────────────────────          ─────
    │  socket://IP:8888          │                               │
-   │  (baud param ignored)      │  UART @ serialgateway baud    │
+   │  (baud param ignored)      │  UART @ bridge baud           │
    ├───────────────────────────>├──────────────────────────────>│
    │                            │                               │
    │  USF says "probe at 460800"│                               │
    │  but actual wire speed is  │  actual wire = 115200         │
-   │  whatever serialgateway    │  (or whatever -b says)        │
-   │  is running at.            │                               │
+   │  whatever the bridge's     │  (or whatever baud says)      │
+   │  baud parameter says.      │                               │
 ```
 
 This means:
-- All probe methods reach the EFR32 at the **same** baud rate (serialgateway's)
+- All probe methods reach the EFR32 at the **same** baud rate (the bridge's)
 - USF **cannot** change the baud rate mid-session — only the gateway can
 - The "baud" column in USF's probe table only matters for direct serial
   connections (e.g., `/dev/ttyUSB0`)
@@ -84,10 +86,10 @@ If you recompile firmware at a different baud (e.g., 230400), the standard
 flash fails:
 
 ```
-serialgateway @ 115200  ←→  EFR32 firmware @ 230400  →  garbage  →  probe fails
+kernel bridge @ 115200  ←→  EFR32 firmware @ 230400  →  garbage  →  probe fails
 ```
 
-USF tries all its probe methods, but since they all go through serialgateway
+USF tries all its probe methods, but since they all go through the bridge
 at 115200, none can reach the 230400 firmware. Result:
 `Error: Failed to probe running application type`.
 
@@ -95,22 +97,25 @@ at 115200, none can reach the 230400 firmware. Result:
 
 ## 4. Recovery: How `flash_efr32.sh` Handles It
 
-When the standard flash fails, the script enters a recovery loop:
+When the standard flash fails, the script enters a recovery loop. The
+in-kernel UART bridge lets us change the wire baud without any process
+restart — `echo <baud> > .../baud` re-applies termios in place and
+TCP:8888 never drops.
 
 ```
-Step 1: Standard flash (serialgateway @ 115200)
+Step 1: Standard flash (bridge @ 115200, flow_control=0)
         → FAILS: firmware at non-standard baud
 
 Step 2: for BAUD in 230400 460800:
-          Restart serialgateway at $BAUD via SSH
+          echo $BAUD > /sys/module/rtl8196e_uart_bridge/parameters/baud
           Run USF flash again
-            → USF detects firmware (serialgateway now at matching baud)
+            → USF detects firmware (bridge now at matching baud)
             → USF sends enter_bootloader (protocol-specific command)
             → Gecko Bootloader starts... but at 115200
             → USF tries to probe bootloader at $BAUD
             → FAILS: baud mismatch with bootloader
 
-Step 3: Restart serialgateway at 115200 via SSH
+Step 3: echo 115200 > /sys/module/rtl8196e_uart_bridge/parameters/baud
         → Now matches the Gecko Bootloader
 
 Step 4: USF flash with --probe-methods "bootloader:115200"
@@ -121,17 +126,17 @@ Step 4: USF flash with --probe-methods "bootloader:115200"
 
 The key trick: **USF sends `enter_bootloader` as a side-effect of its failed
 flash attempt** in step 2. Even though the flash fails (baud mismatch with
-bootloader), the EFR32 is now in bootloader mode. We just need to restart
-serialgateway at 115200 to talk to it.
+bootloader), the EFR32 is now in bootloader mode. We just need to change the
+bridge baud to 115200 to talk to it.
 
-### Why the two-step dance is unavoidable
+### Why the baud dance is still needed
 
-1. USF cannot change serialgateway's baud rate (no out-of-band control channel)
+1. USF cannot change the bridge's baud (no out-of-band control channel
+   over `socket://`)
 2. The firmware baud ≠ the bootloader baud (bootloader is always 115200)
-3. After `enter_bootloader`, we MUST restart serialgateway at a different baud
-
-No amount of patching USF can solve this over TCP — the script must
-orchestrate the serialgateway restarts via SSH.
+3. After `enter_bootloader`, we MUST retune the bridge to a different
+   baud — but with the kernel bridge this is one sysfs write, not a
+   process respawn.
 
 ---
 
@@ -192,9 +197,11 @@ flash), software recovery is not possible — a J-Link/SWD debugger is required.
 - After `enter_bootloader`, the Gecko Bootloader waits for a connection
   (typically ~60 seconds before timeout). The recovery script completes well
   within this window.
-- `sleep 1` after restarting serialgateway gives it time to bind the TCP port.
-- The full recovery (standard flash fail + scan + enter_bootloader + restart +
-  bootloader flash) takes about **90 seconds** for a 208 KB firmware.
+- Changing the bridge baud via sysfs is a single `tty_set_termios()` —
+  no `sleep` needed, the write returns only after termios is applied.
+- The full recovery (standard flash fail + scan + enter_bootloader +
+  baud retune + bootloader flash) takes about **90 seconds** for a
+  208 KB firmware.
 
 ---
 

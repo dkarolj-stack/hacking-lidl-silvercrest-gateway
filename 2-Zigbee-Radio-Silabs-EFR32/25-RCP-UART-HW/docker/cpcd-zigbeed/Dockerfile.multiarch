@@ -8,7 +8,7 @@
 #
 # Versions:
 #   - cpcd: v4.5.3 (from GitHub cpc-daemon)
-#   - zigbeed: EmberZNet 8.2.2 / EZSP 18 (from Simplicity SDK 2025.6.2)
+#   - zigbeed: EmberZNet 8.2.2 / EZSP 18 (from Simplicity SDK 2025.6.3)
 #
 # Architecture:
 #   TCP:8888 (gateway) -> socat -> cpcd -> zigbeed -> socat -> TCP:9999 (Z2M)
@@ -21,7 +21,7 @@
 FROM --platform=linux/amd64 ubuntu:24.04 AS generator
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG SIMPLICITY_SDK_VERSION=v2025.6.2
+ARG SIMPLICITY_SDK_VERSION=v2025.6.3
 
 # Install dependencies for slc-cli
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -65,7 +65,7 @@ RUN slc generate zigbeed.slcp \
     --without=zigbee_recommended_linux_arch \
     -o makefile \
     --force 2>&1 | tail -5
-RUN rm -rf simplicity_sdk_* && ln -s "${SIMPLICITY_SDK}" simplicity_sdk_2025.6.2
+RUN rm -rf simplicity_sdk_* && ln -s "${SIMPLICITY_SDK}" simplicity_sdk_2025.6.3
 
 # Generate zigbeed project for arm64
 WORKDIR /generated/arm64
@@ -78,7 +78,7 @@ RUN slc generate zigbeed.slcp \
     --without=zigbee_recommended_linux_arch \
     -o makefile \
     --force 2>&1 | tail -5
-RUN rm -rf simplicity_sdk_* && ln -s "${SIMPLICITY_SDK}" simplicity_sdk_2025.6.2
+RUN rm -rf simplicity_sdk_* && ln -s "${SIMPLICITY_SDK}" simplicity_sdk_2025.6.3
 
 # ============================================================
 # Stage 2: Builder (multi-arch native compilation)

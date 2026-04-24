@@ -1,17 +1,17 @@
 # zigbeed - EmberZNet 8.2.2 (EZSP 18)
 
-Build script for zigbeed from Simplicity SDK 2025.6.2.
+Build script for zigbeed from Simplicity SDK 2025.6.3.
 Portable: works on x86_64, ARM64 (Raspberry Pi 4/5), ARM32.
 
 ## Why This Version?
 
 The Gecko SDK 4.5.0 produces zigbeed with EmberZNet 7.5.1 (EZSP 13).
-The Simplicity SDK 2025.6.2 produces zigbeed with EmberZNet 8.2.2 (EZSP 18).
+The Simplicity SDK 2025.6.3 produces zigbeed with EmberZNet 8.2.2 (EZSP 18).
 
 | Directory | SDK | EmberZNet | EZSP |
 |-----------|-----|-----------|------|
 | `../zigbeed/` | Gecko SDK 4.5.0 | 7.5.1 | 13 |
-| `zigbeed-8.2.2/` | Simplicity SDK 2025.6.2 | 8.2.2 | 18 |
+| `zigbeed-8.2.2/` | Simplicity SDK 2025.6.3 | 8.2.2 | 18 |
 
 ## Prerequisites
 
@@ -23,7 +23,7 @@ The Simplicity SDK 2025.6.2 produces zigbeed with EmberZNet 8.2.2 (EZSP 18).
 cd ../cpcd && ./build_cpcd.sh
 ```
 
-> **Note:** The Simplicity SDK 2025.6.2 is downloaded automatically from GitHub on first build.
+> **Note:** The Simplicity SDK 2025.6.3 is downloaded automatically from GitHub on first build.
 
 ## Build and Install
 
@@ -87,7 +87,7 @@ serial:
   # or with PTY
   port: /tmp/ttyZ2M
   adapter: ember
-  baudrate: 115200
+  baudrate: 460800
 ```
 
 ## Expected Z2M Log

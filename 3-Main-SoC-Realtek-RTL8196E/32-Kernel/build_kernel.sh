@@ -1,37 +1,44 @@
 #!/bin/bash
-# build_kernel.sh — Build Linux 5.10.246 for Realtek RTL8196E (Lexra MIPS)
+# build_kernel.sh — Build Linux 6.18.x for Realtek RTL8196E (Lexra MIPS)
+#
+# Layout:
+#   patches-6.18/, files-6.18/, config-6.18-realtek.txt  →  kernel-6.18.img
+#
+# KERNEL_VERSION pins the exact stable point release (e.g. 6.18.24).
+# KERNEL_MAJOR_MINOR is the family used in file/directory names
+# (patches-6.18/, linux-6.18-rtl8196e/, kernel-6.18.img) so point bumps
+# don't churn paths.
 #
 # Uses arch/mips/boot/compressed/ (zboot) — no external lzma or lzma-loader.
 #
-# Supports two Ethernet drivers selectable at build time:
-#   - rtl8196e  (new, recommended) — default
-#   - rtl819x       (legacy SDK port)  — pass 'legacy' argument
-#
 # Usage:
-#   ./build_kernel.sh              # new driver → kernel.img
-#   ./build_kernel.sh legacy       # legacy driver → kernel-legacy.img
-#   ./build_kernel.sh clean        # remove build tree, rebuild from scratch
-#   ./build_kernel.sh menuconfig   # open menuconfig
-#   ./build_kernel.sh olddefconfig # update .config non-interactively
-#   ./build_kernel.sh vmlinux      # build vmlinux only (no packaging)
+#   ./build_kernel.sh                # build → kernel-6.18.img
+#   ./build_kernel.sh clean          # wipe build tree, rebuild from scratch
+#   ./build_kernel.sh menuconfig     # open menuconfig
+#   ./build_kernel.sh olddefconfig   # update .config non-interactively
+#   ./build_kernel.sh vmlinux        # build vmlinux only (no packaging)
 #   ./build_kernel.sh --help
 #
-# Both drivers use the same patches/ and files/ tree.
-# The skbuff.c patch is guarded with #ifdef CONFIG_RTL819X so it is safe
-# to apply unconditionally regardless of which driver is selected.
-#
-# J. Nilo — February 2026
+# J. Nilo — February 2026, unified April 2026
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-KERNEL_VERSION="5.10.246"
-KERNEL_MAJOR="5.x"
+# ── Kernel source + overlay layout (6.18.x) ───────────────────────────────
+
+KERNEL_VERSION="6.18.24"            # exact tarball version
+KERNEL_MAJOR_MINOR="6.18"           # stable family (paths, image name)
+KERNEL_MAJOR="6.x"                  # kernel.org /pub/linux/kernel/v${MAJOR}/
 KERNEL_TARBALL="linux-${KERNEL_VERSION}.tar.xz"
 KERNEL_URL="https://cdn.kernel.org/pub/linux/kernel/v${KERNEL_MAJOR}/${KERNEL_TARBALL}"
 VANILLA_DIR="linux-${KERNEL_VERSION}"
+
+PATCHES_DIR="${SCRIPT_DIR}/patches-${KERNEL_MAJOR_MINOR}"
+FILES_DIR="${SCRIPT_DIR}/files-${KERNEL_MAJOR_MINOR}"
+CONFIG_FILE="${SCRIPT_DIR}/config-${KERNEL_MAJOR_MINOR}-realtek.txt"
+IMAGE="${SCRIPT_DIR}/kernel-${KERNEL_MAJOR_MINOR}.img"
 
 TOOLCHAIN_DIR="${PROJECT_ROOT}/x-tools/mips-lexra-linux-musl"
 # Add toolchain to PATH only if not already available (avoids GLIBC mismatch in Docker)
@@ -70,9 +77,8 @@ fi
 CVIMG_BURN_ADDR="0x00020000"
 SIGNATURE="cs6c"
 
-# ── Option parsing ─────────────────────────────────────────────────────────
+# ── Option parsing ────────────────────────────────────────────────────────
 
-DRIVER="new"          # new | legacy
 DO_CLEAN=false
 DO_MENUCONFIG=false
 DO_OLDDEFCONFIG=false
@@ -80,45 +86,23 @@ BUILD_VMLINUX_ONLY=false
 
 for arg in "$@"; do
     case "$arg" in
-        legacy)       DRIVER="legacy" ;;
         clean)        DO_CLEAN=true ;;
         menuconfig)   DO_MENUCONFIG=true ;;
         olddefconfig) DO_OLDDEFCONFIG=true ;;
         vmlinux|no-package) BUILD_VMLINUX_ONLY=true ;;
         --help|-h)
-            echo "Usage: $0 [legacy] [clean|menuconfig|olddefconfig|vmlinux]"
-            echo ""
-            echo "  (none)        New driver (rtl8196e) — default"
-            echo "  legacy        Legacy driver (rtl819x)"
-            echo "  clean         Remove build tree and rebuild from scratch"
-            echo "  menuconfig    Run kernel menuconfig"
-            echo "  olddefconfig  Update .config non-interactively"
-            echo "  vmlinux       Build vmlinux only (no packaging)"
-            echo ""
-            echo "Output:"
-            echo "  new driver  → kernel.img"
-            echo "  legacy      → kernel-legacy.img"
+            sed -n '2,16p' "$0" | sed 's|^# \{0,1\}||'
             exit 0
             ;;
         *) echo "Unknown option: $arg (use --help)"; exit 1 ;;
     esac
 done
 
-# Driver-specific settings
-if [ "$DRIVER" = "new" ]; then
-    export LOCALVERSION="-rtl8196e"
-    BUILD_DIR="${SCRIPT_DIR}/linux-${KERNEL_VERSION}-rtl8196e"
-    IMAGE="${SCRIPT_DIR}/kernel.img"
-    DRIVER_LABEL="rtl8196e (new, recommended)"
-else
-    export LOCALVERSION="-rtl8196e"
-    BUILD_DIR="${SCRIPT_DIR}/linux-${KERNEL_VERSION}-rtl8196e-legacy"
-    IMAGE="${SCRIPT_DIR}/kernel-legacy.img"
-    DRIVER_LABEL="rtl819x (legacy)"
-fi
+export LOCALVERSION="-rtl8196e"
+BUILD_DIR="${SCRIPT_DIR}/linux-${KERNEL_MAJOR_MINOR}-rtl8196e"
 
 echo "==================================================================="
-echo "  Linux ${KERNEL_VERSION} — RTL8196E — driver: ${DRIVER_LABEL}"
+echo "  Linux ${KERNEL_VERSION} — RTL8196E — driver: rtl8196e"
 echo "  Compression: arch/mips/boot/compressed/ (zboot)"
 echo "==================================================================="
 echo ""
@@ -132,7 +116,19 @@ if ! command -v ${CROSS_COMPILE}gcc >/dev/null 2>&1; then
 fi
 echo "Toolchain: $(${CROSS_COMPILE}gcc --version | head -1)"
 
-echo "Build dir: $BUILD_DIR"
+if [ ! -d "$PATCHES_DIR" ]; then
+    echo "ERROR: patches dir not found: $PATCHES_DIR"
+    exit 1
+fi
+if [ ! -d "$FILES_DIR" ]; then
+    echo "ERROR: files dir not found: $FILES_DIR"
+    exit 1
+fi
+
+echo "Build dir:   $BUILD_DIR"
+echo "Patches dir: $(basename "$PATCHES_DIR")"
+echo "Files dir:   $(basename "$FILES_DIR")"
+echo "Config file: $(basename "$CONFIG_FILE")"
 echo ""
 
 # ── Clean ──────────────────────────────────────────────────────────────────
@@ -163,19 +159,15 @@ if [ ! -f "$BUILD_DIR/Makefile" ]; then
 
     cd "$BUILD_DIR"
 
-    # Apply ALL patches — skbuff.c is guarded with #ifdef CONFIG_RTL819X
-    echo "Applying patches..."
-    for patch in "${SCRIPT_DIR}/patches"/*.patch; do
+    # Apply patches
+    echo "Applying patches from $(basename "$PATCHES_DIR")..."
+    shopt -s nullglob
+    for patch in "$PATCHES_DIR"/*.patch; do
         [ -f "$patch" ] || continue
         echo "  $(basename "$patch")"
-        patch -p1 -N < "$patch" 2>/dev/null || echo "    (already applied)"
+        patch -p1 -N < "$patch" 2>/dev/null || echo "    (already applied or failed)"
     done
-    echo ""
-
-    # Copy platform files (arch, drivers: gpio, spi, serial, leds, etc.)
-    echo "Copying platform files (files/)..."
-    cp -r "${SCRIPT_DIR}/files/arch" .
-    cp -r "${SCRIPT_DIR}/files/drivers" .
+    shopt -u nullglob
     echo ""
 else
     echo "Build tree already present: $BUILD_DIR"
@@ -184,39 +176,36 @@ fi
 
 cd "$BUILD_DIR"
 
+# Re-sync the overlay on every run. rsync -a preserves timestamps and only
+# touches files that actually differ, so make's incremental rebuild stays
+# correct: a file edited in files-6.18/ gets copied into the build tree,
+# its mtime bumps, make rebuilds it. Files that didn't change are skipped.
+# This closes the "edited files-6.18/X but build was a no-op" footgun.
+echo "Syncing overlay from $(basename "$FILES_DIR")..."
+[ -d "${FILES_DIR}/arch" ]    && rsync -a "${FILES_DIR}/arch/"    "$BUILD_DIR/arch/"
+[ -d "${FILES_DIR}/drivers" ] && rsync -a "${FILES_DIR}/drivers/" "$BUILD_DIR/drivers/"
+[ -d "${FILES_DIR}/include" ] && rsync -a "${FILES_DIR}/include/" "$BUILD_DIR/include/"
+echo ""
+
 # ── Config ─────────────────────────────────────────────────────────────────
 
 if [ ! -f .config ]; then
-    echo "Setting up .config (driver: ${DRIVER_LABEL})..."
-    if [ "$DRIVER" = "new" ]; then
-        # Config already has RTL8196E_ETH=y, RTL819X unset, KERNEL_LZMA=y
-        cp "${SCRIPT_DIR}/config-5.10.246-realtek.txt" .config
-    else
-        # Legacy: swap driver selection
-        sed \
-            -e 's/^# CONFIG_RTL819X is not set$/CONFIG_RTL819X=y/' \
-            -e 's/^CONFIG_RTL8196E_ETH=y$/# CONFIG_RTL8196E_ETH is not set/' \
-            "${SCRIPT_DIR}/config-5.10.246-realtek.txt" > .config
+    echo "Setting up .config..."
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo "ERROR: config file not found: $CONFIG_FILE" >&2
+        exit 1
     fi
+    cp "$CONFIG_FILE" .config
     make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE olddefconfig
     echo ""
 else
     NEED_OLDDEFCONFIG=false
 
-    if [ "$DRIVER" = "new" ]; then
-        if ! grep -q '^CONFIG_RTL8196E_ETH=y' .config; then
-            echo "Fixing .config: enabling RTL8196E_ETH..."
-            sed -i 's/^# CONFIG_RTL8196E_ETH is not set$/CONFIG_RTL8196E_ETH=y/' .config
-            grep -q '^CONFIG_RTL8196E_ETH=y' .config || echo "CONFIG_RTL8196E_ETH=y" >> .config
-            NEED_OLDDEFCONFIG=true
-        fi
-    else
-        if ! grep -q '^CONFIG_RTL819X=y' .config; then
-            echo "Fixing .config: enabling RTL819X..."
-            sed -i 's/^# CONFIG_RTL819X is not set$/CONFIG_RTL819X=y/' .config
-            grep -q '^CONFIG_RTL819X=y' .config || echo "CONFIG_RTL819X=y" >> .config
-            NEED_OLDDEFCONFIG=true
-        fi
+    if ! grep -q '^CONFIG_RTL8196E_ETH=y' .config; then
+        echo "Fixing .config: enabling RTL8196E_ETH..."
+        sed -i 's/^# CONFIG_RTL8196E_ETH is not set$/CONFIG_RTL8196E_ETH=y/' .config
+        grep -q '^CONFIG_RTL8196E_ETH=y' .config || echo "CONFIG_RTL8196E_ETH=y" >> .config
+        NEED_OLDDEFCONFIG=true
     fi
 
     if ! grep -q '^CONFIG_KERNEL_LZMA=y' .config; then
@@ -326,4 +315,4 @@ echo "  vmlinuz.bin  : $(numfmt --to=iec-i --suffix=B $vmlinuz_size)  (decompres
 echo "  Final image  : $(numfmt --to=iec-i --suffix=B $img_size)"
 echo ""
 echo "Image ready: $IMAGE"
-echo "Flash with:  tftp -m binary 192.168.1.6 -c put $(basename "$IMAGE")"
+echo "Flash with:  ./flash_kernel.sh"

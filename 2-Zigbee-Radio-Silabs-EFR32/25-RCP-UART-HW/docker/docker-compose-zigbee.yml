@@ -1,0 +1,106 @@
+# Docker Compose for Zigbee stack with Lidl Silvercrest Gateway (RCP mode)
+#
+# Usage:
+#   1. Set RCP_HOST to your gateway's IP address
+#   2. docker compose up -d
+#   3. Access Zigbee2MQTT at http://localhost:8080
+#
+# See EMBERZNET-8.x-GUIDE.md for full documentation.
+
+services:
+  # MQTT broker - must be healthy before Z2M starts
+  mosquitto:
+    container_name: mosquitto
+    image: eclipse-mosquitto
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - mosquitto_data:/mosquitto/data
+      - mosquitto_log:/mosquitto/log
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    environment:
+      - TZ=Europe/Paris
+    restart: unless-stopped
+    healthcheck:
+      # nc is used because pgrep is not available in alpine-based mosquitto image
+      # Add "connection_messages false" to mosquitto.conf to silence connection logs
+      test: ["CMD-SHELL", "nc -z localhost 1883"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  # CPC daemon + Zigbee stack (EmberZNet 8.x via zigbeed)
+  cpcd-zigbeed:
+    container_name: cpcd-zigbeed
+    image: ghcr.io/jnilo1/cpcd-zigbeed:latest
+    # To build locally instead:
+    # build:
+    #   context: ./cpcd-zigbeed
+    #   dockerfile: Dockerfile
+    environment:
+      - TZ=Europe/Paris
+      # ============================================================
+      # REQUIRED: Set this to your Lidl gateway's IP address
+      # The gateway must be running kernel 6.18 with rtl8196e-uart-bridge
+      # armed on port 8888 (automatic via S50uart_bridge at boot)
+      # ============================================================
+      - RCP_HOST=192.168.1.88
+      - RCP_PORT=8888
+      # ============================================================
+      - CPCD_INSTANCE=cpcd_0
+      # Must match the RCP firmware baudrate (default: 460800)
+      - UART_BAUDRATE=460800
+      # Port exposed to Z2M (internal to Docker network)
+      - ZIGBEED_PORT=9999
+      # Set to 1 for debug logs, 0 for production
+      - ZIGBEED_DEBUG=0
+    volumes:
+      # Persistent storage for Zigbee network state and tokens
+      - zigbeed_data:/var/lib/zigbeed
+      # tmpfs for CPC sockets (required for cpcd)
+      - type: tmpfs
+        target: /dev/shm
+        tmpfs:
+          size: 64M
+    restart: unless-stopped
+    # Required for zigbeed crash debugging
+    cap_add:
+      - SYS_PTRACE
+    healthcheck:
+      # Z2M waits for this before starting
+      test: ["CMD", "nc", "-z", "localhost", "9999"]
+      interval: 30s
+      timeout: 10s
+      # zigbeed needs time to connect to cpcd and initialize
+      start_period: 60s
+      retries: 3
+
+  # Zigbee2MQTT - web interface on port 8080
+  zigbee2mqtt:
+    container_name: zigbee2mqtt
+    image: ghcr.io/koenkk/zigbee2mqtt:2.7.2
+    environment:
+      - TZ=Europe/Paris
+    volumes:
+      - z2m_data:/app/data
+      # Mount your config file (edit z2m/configuration.yaml)
+      - ./z2m/configuration.yaml:/app/data/configuration.yaml
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    # Critical: wait for both services to be healthy
+    # This prevents MQTT DNS errors and zigbeed connection failures
+    depends_on:
+      cpcd-zigbeed:
+        condition: service_healthy
+      mosquitto:
+        condition: service_healthy
+
+volumes:
+  mosquitto_data:
+  mosquitto_log:
+  # Contains host_token.nvm - DO NOT DELETE or you lose your Zigbee network
+  zigbeed_data:
+  z2m_data:

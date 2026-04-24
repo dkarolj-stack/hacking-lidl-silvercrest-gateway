@@ -1,7 +1,7 @@
 # OpenThread RCP for Lidl Silvercrest Gateway
 # Based on SDK sample: protocol/openthread/sample-apps/ot-ncp/ot-rcp.slcp
 # Target: EFR32MG1B232F256GM48
-# UART: USART0, PA0/PA1/PA4/PA5, 115200 baud, HW flow control
+# UART: USART0, PA0/PA1/PA4/PA5, 460800 baud, HW flow control
 
 project_name: ot-rcp
 label: OpenThread - RCP (Lidl Gateway)
@@ -36,12 +36,12 @@ source:
 configuration:
   - name: SL_BOARD_ENABLE_VCOM
     value: 1
-  # UART: 115200 baud for OTBR/zigbee-on-host (reduced for stability over TCP)
+  # UART: 460800 baud (matches S50uart_bridge default on the gateway)
   - name: SL_UARTDRV_USART_VCOM_BAUDRATE
-    value: 115200
+    value: 460800
   - name: OPENTHREAD_CONFIG_HEAP_EXTERNAL_ENABLE
     value: 0
-  # Hardware flow control (GPIO-managed, compatible with serialgateway CRTSCTS)
+  # Hardware flow control (GPIO-managed, must match the gateway UART bridge CRTSCTS)
   - name: SL_UARTDRV_USART_VCOM_FLOW_CONTROL_TYPE
     value: uartdrvFlowControlHw
     condition: [uartdrv_usart]

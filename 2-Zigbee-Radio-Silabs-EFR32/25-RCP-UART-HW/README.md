@@ -6,7 +6,7 @@ This firmware transforms the gateway's Zigbee chip into a **Radio Co-Processor**
 
 | Mode | Stack | Host | Details |
 |------|-------|------|---------|
-| **Zigbee (cpcd + zigbeed)** | EmberZNet | External PC/RPi via serialgateway | See [Host Software Setup](#host-software-setup) |
+| **Zigbee (cpcd + zigbeed)** | EmberZNet | External PC/RPi via the in-kernel UART bridge | See [Host Software Setup](#host-software-setup) |
 | **Thread (OTBR)** | OpenThread | Natively on the RTL8196E gateway | See [`3-Main-SoC.../34-Userdata/ot-br-posix/`](../../3-Main-SoC-Realtek-RTL8196E/34-Userdata/ot-br-posix/README.md) |
 
 ## About RCP Architecture
@@ -15,11 +15,12 @@ Unlike standalone firmware (like the Router), an RCP delegates the entire Zigbee
 
 ```
 +-------------------+    UART     +-------------------+   Ethernet   +---------------------+
-|  EFR32MG1B (RCP)  |   115200    |  RTL8196E         |    TCP/IP    |  Host (x86/ARM)     |
+|  EFR32MG1B (RCP)  |   460800    |  RTL8196E         |    TCP/IP    |  Host (x86/ARM)     |
 |                   |    baud     |  (Gateway SoC)    |              |                     |
-|  802.15.4 PHY/MAC |<----------->|                   |<------------>|  cpcd               |
-|  + CPC Protocol   |   ttyS1     |  serialgateway    |   port 8888  |    |                |
-|                   |             |  (serial->TCP)    |              |    v                |
+|  802.15.4 PHY/MAC |<----------->|  in-kernel        |<------------>|  cpcd               |
+|  + CPC Protocol   |   ttyS1     |  UART<->TCP bridge|   port 8888  |    |                |
+|                   |             |  (rtl8196e-uart-  |              |    v                |
+|                   |             |   bridge)         |              |                     |
 |  CPC Protocol v5  |             |                   |              |  zigbeed            |
 |  HW Flow Control  |             |                   |              |  (Zigbee stack)     |
 |                   |             |                   |              |    |                |
@@ -46,7 +47,7 @@ Unlike standalone firmware (like the Router), an RCP delegates the entire Zigbee
 | Flash | 256KB |
 | RAM | 32KB |
 | Radio | 2.4GHz IEEE 802.15.4 |
-| UART | PA0 (TX), PA1 (RX), PA4 (RTS), PA5 (CTS) @ 115200 baud |
+| UART | PA0 (TX), PA1 (RX), PA4 (RTS), PA5 (CTS) @ 460800 baud |
 
 ---
 
@@ -59,7 +60,7 @@ Pre-built firmware is available in the `firmware/` directory. From the repositor
 # Select [3] RCP-UART-HW
 ```
 
-The script handles everything (serialgateway restart, flash, reboot).
+The script handles everything (switch the in-kernel UART bridge to flash mode, flash, reboot).
 
 Then continue to [Host Software Setup](#host-software-setup) to configure cpcd and zigbeed on your host machine.
 
@@ -129,7 +130,7 @@ After flashing the RCP firmware, you need to configure the host software chain.
 | Component | Version | Source | Description |
 |-----------|---------|--------|-------------|
 | cpcd | v4.5.3 | [SiliconLabs/cpc-daemon](https://github.com/SiliconLabs/cpc-daemon) | CPC daemon |
-| zigbeed | EmberZNet 8.2.2 | Simplicity SDK 2025.6.2 | Zigbee stack daemon (recommended) |
+| zigbeed | EmberZNet 8.2.2 | Simplicity SDK 2025.6.3 | Zigbee stack daemon (recommended) |
 | zigbeed | EmberZNet 7.5.1 | Gecko SDK 4.5.0 | Zigbee stack daemon (legacy) |
 
 ### Build Instructions
@@ -151,8 +152,8 @@ docker pull ghcr.io/jnilo1/cpcd-zigbeed:latest
 
 # Or use the full stack with Zigbee2MQTT
 cd docker/
-# Edit docker-compose.yml: set RCP_HOST to your gateway's IP
-docker compose up -d
+# Edit docker-compose-zigbee.yml: set RCP_HOST to your gateway's IP
+docker compose -f docker-compose-zigbee.yml up -d
 ```
 
 See `docker/README.md` for detailed instructions.
@@ -196,9 +197,21 @@ serial:
 
 | Baudrate | Status | Notes |
 |----------|--------|-------|
-| **115200** | **Default** | Conservative, reliable |
-| 230400 | Supported | Tested, works reliably |
-| 460800+ | **Not supported** | Causes UART overruns |
+| 115200 | Supported | Conservative |
+| 230400 | Supported | |
+| **460800** | **Default** | Max supported by cpcd (POSIX baud limit) |
+| 692857 | Not usable | Non-standard — cpcd rejects it |
+| 892857 | Not usable | Non-standard — cpcd rejects it |
+
+cpcd validates baud rates against the POSIX standard list and rejects
+non-standard values like 691200 or 892857 (even over a TCP/PTY bridge
+where the baud is irrelevant). **460800 is the practical maximum for
+RCP mode.** Higher bauds (up to 892857) are available for NCP and
+OT-RCP, which don't use cpcd.
+
+All bauds run through the in-kernel `rtl8196e-uart-bridge` driver on
+kernel 6.18 — change via
+`echo <baud> > /sys/module/rtl8196e_uart_bridge/parameters/baud`.
 
 ### Network Size vs Baudrate
 
@@ -206,26 +219,36 @@ serial:
 |---------|------------|
 | 802.15.4 radio | ~25 KB/s |
 | UART 115200 | ~11 KB/s |
-| UART 230400 | ~23 KB/s |
+| UART 460800 | ~46 KB/s |
+| UART 892857 | ~89 KB/s |
 
-At 115200, the UART is ~2x slower than the Zigbee radio. Practical impact:
+At 115200, the UART is ~2x slower than the Zigbee radio. At 460800+
+it is no longer the bottleneck.
 
-| Network size | 115200 | 230400 |
-|--------------|--------|--------|
-| < 50 devices | OK | OK |
-| 50-100 devices | OK* | Recommended |
-| > 100 devices | May bottleneck | Recommended |
+| Network size | 115200 | 230400 | 460800+ |
+|--------------|--------|--------|---------|
+| < 50 devices | OK | OK | OK |
+| 50-100 devices | OK* | OK | Recommended |
+| > 100 devices | May bottleneck | OK | Recommended |
 
 *OK for normal use; possible latency during traffic spikes (OTA updates, large groups).
 
 For most home installations, 115200 is sufficient.
 
-### Why 460800+ Doesn't Work
+### Maximum Baud: Why 892857 and Not 921600
 
-The RTL8196E UART has hardware limitations:
-- **16-byte FIFO** (16550A standard) with RX trigger at 8 bytes
-- At 460800 baud, the CPU has only **170 µs** to respond before overrun
-- `serialgateway` runs in userspace, adding context switch latency
+The RTL8196E UART has a **fixed 16× oversampling** with integer-only
+divisors and a 200 MHz bus clock. The achievable baud is
+`200000000 / (16 × N)` for integer N. For 921600 the divisor falls at
+13.56 — neither 13 nor 14 gives acceptable error (−3.1% / +4.3%).
+
+**892857** = 200000000 / (16 × 14) hits an exact integer divisor,
+giving **0% baud error** on the RTL side. The EFR32 reaches 893023
+with its fractional divider (0.02% mismatch). This is 7.7× the
+original 115200 and within 3% of 921600.
+
+See `3-Main-SoC-Realtek-RTL8196E/32-Kernel/POST-MORTEM-6.18.md` for
+the full N+1 divisor investigation.
 
 Check UART errors on the gateway:
 ```bash
@@ -235,12 +258,16 @@ cat /proc/tty/driver/serial
 
 ### Changing Baudrate
 
-To use 230400:
-1. Edit `patches/sl_cpc_drv_uart_usart_vcom_config.h`
-2. Edit `patches/rcp-uart-802154.slcp`
-3. Rebuild firmware and flash
-4. Update `serialgateway -b 230400` on gateway
-5. Update `cpcd.conf` with `uart_device_baud: 230400`
+1. Edit `patches/sl_cpc_drv_uart_usart_vcom_config.h` — change
+   `SL_CPC_DRV_UART_VCOM_BAUDRATE`
+2. Rebuild firmware and flash the EFR32
+3. Set the bridge baud on the gateway:
+   `echo <baud> > /sys/module/rtl8196e_uart_bridge/parameters/baud`
+   (persist in `/userdata/etc/radio.conf` via `BRIDGE_BAUD=<baud>`)
+4. Update `UART_BAUDRATE` in `docker-compose-zigbee.yml` (or `cpcd.conf`)
+
+The baud must be a standard POSIX value (115200, 230400, 460800) for
+cpcd to accept it.
 
 ---
 
@@ -338,7 +365,7 @@ The CPC protocol is sensitive to network conditions. For reliable operation:
 
 - [CPC Daemon](https://github.com/SiliconLabs/cpc-daemon)
 - [AN1333: Multiprotocol RCP](https://www.silabs.com/documents/public/application-notes/an1333-concurrent-protocols-with-802-15-4-rcp.pdf)
-- [serialgateway](https://github.com/jnilo1/hacking-lidl-silvercrest-gateway/tree/main/3-Main-SoC-Realtek-RTL8196E/34-Userdata/serialgateway)
+- [rtl8196e-uart-bridge](https://github.com/jnilo1/hacking-lidl-silvercrest-gateway/tree/main/3-Main-SoC-Realtek-RTL8196E/32-Kernel/files-6.18/drivers/net/rtl8196e-uart-bridge)
 
 ## License
 

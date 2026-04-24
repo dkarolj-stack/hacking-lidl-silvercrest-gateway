@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: Zlib
  *
  * Target: EFR32MG1B232F256GM48
- * UART: USART0, 115200 baud, HW flow control
+ * UART: USART0, 460800 baud, HW flow control
  * Pins: TX=PA0, RX=PA1, RTS=PA4, CTS=PA5
  ******************************************************************************/
 
@@ -18,7 +18,7 @@
 // <h> UART settings
 // <o SL_UARTDRV_USART_VCOM_BAUDRATE> Baud rate
 // <i> Default: 115200
-#define SL_UARTDRV_USART_VCOM_BAUDRATE        115200
+#define SL_UARTDRV_USART_VCOM_BAUDRATE        460800
 
 // <o SL_UARTDRV_USART_VCOM_PARITY> Parity mode to use
 // <usartNoParity=> No Parity

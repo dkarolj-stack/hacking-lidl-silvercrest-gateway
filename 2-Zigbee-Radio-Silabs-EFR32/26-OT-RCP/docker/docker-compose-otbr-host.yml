@@ -1,7 +1,8 @@
 # Use case 2: OTBR on host — Thread/Matter with OTBR running on your PC
 #
 # Stack: OTBR (Docker) + Matter Server + Home Assistant
-# The gateway runs serialgateway only — OTBR runs here on the host.
+# The gateway only forwards the UART over TCP via its in-kernel bridge —
+# OTBR runs here on the host.
 #
 # See also:
 #   docker-compose-zoh.yml          — Use case 1: Zigbee (zigbee-on-host)
@@ -9,7 +10,8 @@
 #
 # Usage:
 #   1. Flash ot-rcp.gbl to the EFR32, flash userdata in Zigbee mode
-#   2. Ensure serialgateway is running on the gateway (port 8888, 115200 baud)
+#   2. Ensure the gateway runs kernel 6.18 with rtl8196e-uart-bridge armed at
+#      460800 baud (S50uart_bridge default) on TCP:8888
 #   3. Edit RCP_HOST and OTBR_BACKBONE_IF below
 #   4. docker compose -f docker-compose-otbr-host.yml up -d
 #   5. Open Home Assistant at http://localhost:8123
@@ -17,7 +19,7 @@
 #   7. Commission Matter devices via Settings → Devices → Add Device → Matter
 
 services:
-  # OpenThread Border Router — connects to OT-RCP via serialgateway
+  # OpenThread Border Router — connects to OT-RCP via the kernel UART bridge
   otbr:
     container_name: otbr
     image: bnutzer/otbr-tcp
@@ -29,11 +31,12 @@ services:
     environment:
       # ============================================================
       # REQUIRED: Set this to your Lidl gateway's IP address
-      # The gateway must be running serialgateway on port 8888
+      # The gateway must be running the in-kernel UART bridge on port 8888
+      # (armed by S50uart_bridge at boot)
       # ============================================================
       - RCP_HOST=192.168.1.88   # ← Your gateway's IP (default)
       - RCP_PORT=8888
-      - RCP_BAUDRATE=115200
+      - RCP_BAUDRATE=460800
       # ============================================================
       # Thread/OTBR configuration
       - OTBR_LOG_LEVEL_INT=6

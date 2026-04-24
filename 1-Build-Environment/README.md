@@ -105,19 +105,23 @@ Build scripts auto-detect these locations — no PATH configuration needed.
 │   └── env.sh                  # Source to load Silabs environment
 │
 └── 1-Build-Environment/
-    ├── Dockerfile              # Docker image definition
-    ├── install_deps.sh         # Ubuntu package installation
+    ├── README.md               # This file
+    ├── CHANGELOG.md             # Build environment & toolchain changelog
+    ├── Dockerfile               # Docker image definition
+    ├── install_deps.sh          # Ubuntu package installation
     │
     ├── 10-lexra-toolchain/     # Lexra MIPS toolchain
     │   ├── build_toolchain.sh  # Build script
     │   ├── crosstool-ng.config # Crosstool-ng configuration
-    │   └── patches/            # GCC/binutils patches for Lexra
+    │   ├── TOOLCHAIN_UPDATE.md # Toolchain modernization spec (Alpine rebase)
+    │   └── patches/            # GCC / binutils / musl patches for Lexra
     │
     ├── 11-realtek-tools/       # Realtek image tools
-    │   ├── build_tools.sh      # Build script
+    │   ├── build_tools.sh      # Build script (also downloads mtd-utils for flash_erase)
+    │   ├── bin/                # Built binaries: cvimg, lzma, flash_erase (output)
     │   ├── cvimg/              # cvimg source
-    │   ├── lzma-4.65/          # LZMA compressor
-    │   └── lzma-loader/        # LZMA decompression loader
+    │   ├── lzma-4.65/          # LZMA compressor source
+    │   └── lzma-loader/        # LZMA decompression loader source
     │
     └── 12-silabs-toolchain/    # Silicon Labs tools
         └── install_silabs.sh   # Download and install slc-cli + SDK
@@ -132,8 +136,9 @@ Build scripts auto-detect these locations — no PATH configuration needed.
 | Item | Value |
 |------|-------|
 | Target | `mips-lexra-linux-musl` |
-| GCC | 8.5.0 |
-| C library | musl 1.2.5 |
+| GCC | 15.2.0 |
+| binutils | 2.45.1 |
+| C library | musl 1.2.6 |
 | Location | `<project>/x-tools/mips-lexra-linux-musl/` |
 
 The Lexra architecture is a MIPS variant without unaligned access instructions (`lwl`, `lwr`, `swl`, `swr`). Standard MIPS toolchains won't work.

@@ -6,6 +6,238 @@ rootfs (33-), and userdata (34-).
 
 ---
 
+## [3.0.0]
+
+Platform-level overhaul: single kernel line, UART↔TCP bridge moves
+in-kernel, **the rewritten `rtl8196e-eth` driver becomes the only ethernet
+path and delivers +47 % TCP TX / +8.5 % TCP RX over the legacy Realtek SDK
+driver** (see the perf table below), all native binaries rebuilt against
+the Alpine-rebased Lexra cross-toolchain (GCC 15.2 / binutils 2.45 /
+musl 1.2.6). See `../1-Build-Environment/CHANGELOG.md` for the toolchain
+side.
+
+### Kernel — Linux 5.10 dropped, 6.18.24 becomes mainstream
+
+- 5.10 tree, patches, config and pre-built `kernel.img` removed. 6.18
+  is the single supported line, vanilla 6.18.24 + `patches-6.18/` +
+  `files-6.18/`.
+- `build_kernel.sh`: `KERNEL_VERSION` (6.18.24) decoupled from
+  `KERNEL_MAJOR_MINOR` (6.18) so future point-release bumps are a
+  one-line edit; `-v`/`--version` flag dropped. Overlay re-synced every
+  run via `rsync -a`, closing the "edited files-6.18/X but build was a
+  no-op" footgun.
+- Output `kernel.img` renamed to `kernel-6.18.img` across scripts,
+  docs and `.gitignore` exception.
+- `build_rtl8196e.sh kernel` passes `clean` so the tree is always built
+  from scratch against the current toolchain (make alone is
+  toolchain-unaware).
+
+### Kernel — in-kernel UART↔TCP bridge replaces userspace `serialgateway`
+
+New kernel driver `rtl8196e-uart-bridge` (built-in,
+`CONFIG_RTL8196E_UART_BRIDGE=y`) shuttles bytes between UART1 (Zigbee
+radio) and TCP:8888.
+- Module parameters for live reconfig (`baud`, `port`, `bind_addr`,
+  `flow_control`, `enable`), mirrored by `/userdata/etc/radio.conf`
+  (`BRIDGE_BAUD=`, `BRIDGE_BIND=`).
+- STATUS LED tied to the `uart-bridge-client` LED trigger (on when a
+  TCP client is connected, off on disarm).
+- Security + robustness audit pass (batch F1–F9): accept/disarm race,
+  short-write retry, sendmsg-shutdown, enable-lock, license tag,
+  disarm-path UAF, lock-scope, IRAM hot-path mutex cost review.
+  Hardening recipes co-located with the source in `SECURITY.md`.
+- Userspace `serialgateway` daemon and `S50serialgateway` removed;
+  `S50uart_bridge` replaces them.
+
+### Kernel — rtl8196e-eth becomes the sole ethernet driver (v2.3)
+
+The from-scratch `rtl8196e-eth` replaces the legacy Realtek SDK driver
+(`rtl819x`, ~7000 LOC, dropped with Linux 5.10) and is now the only
+ethernet path shipped. Benchmarked on the gateway's ~380 MHz single-core
+Lexra against the legacy SDK driver it replaces:
+
+| Test | `rtl819x` (legacy SDK) | **`rtl8196e-eth` v2.3** | Delta |
+|---|:---:|:---:|:---:|
+| TCP RX (host → gw) | 86.6 Mbit/s | **94.0 Mbit/s** | **+8.5 %** |
+| TCP TX (gw → host) | 48.1 Mbit/s | **70.6 Mbit/s** | **+47 %** |
+| TCP parallel 4/8 streams | — | 95.1 / 95.9 Mbit/s | line-saturating |
+| TCP 5-min stress | — | 94.1 Mbit/s, 11 retrans on 2.46 M (0.00 %) | — |
+| UDP 10/50 Mbit RX | — | 0 % loss | — |
+
+Code size: **~1 900 LOC total** across the rewritten driver, a **5.2×
+reduction** from the legacy SDK blob, with modern Linux networking
+idioms (NAPI, phylib, devicetree, regmap/syscon, DMA coherency handled
+explicitly for the non-coherent L1 cache).
+
+Hardening since v2.2 (2026-04-16):
+
+- RX: double-reserve on the initial pool fixed, `NET_IP_ALIGN` reserved
+  on pool init, `wback_inv` ordered before handover to `SWCORE_OWNED`.
+- `led_mode` sysfs migrated to `attribute_group` (F8 refactor).
+- NAPI deferral tuned for slow Lexra CPU.
+- Audit findings F6 and F11+F13+F15 tested on hardware and **rejected**
+  — each introduced measurable perf regressions; see
+  `POST-MORTEM-driver-perf.md`.
+
+### Kernel — UART baud ceiling raised from 230400 to 892857 (N+1 divisor fix)
+
+Root cause was not userspace latency (as long believed) but an
+off-by-one in the RTL8196E UART divisor: the hardware interprets
+DLL/DLM as (N+1), not N. The fix is a `port->set_divisor` hook that
+programs `quot - 1`. Max achievable is **892857 baud**
+(200 MHz / (16 × 14), 0 % error); 921600 is unreachable on this silicon.
+
+| Baud | Divisor | Wire baud | Error | Status |
+|------|---------|-----------|-------|--------|
+| 115200 | 108 | 115741 | +0.47% | Default |
+| 460800 | 27 | 462963 | +0.47% | 8 h soak OK |
+| 691200 | 18 | 694444 | +0.47% | Tested |
+| 892857 | 14 | 892857 | 0.00% | 2 h soak OK |
+
+Also under `8250_rtl819x`: batch-1 audit (IRQ errno, flow-ctrl MCR
+alias, probe defer), `devm_platform_get_and_ioremap_resource`
+migration, hardened probe observability.
+
+### Kernel — driver metadata + GCC 15 hygiene
+
+- `rtl8196e-eth` v2.2 → v2.3; first explicit version 1.0 for
+  `8250_rtl819x` and `rtl8196e-uart-bridge`. `MODULE_VERSION` set,
+  `<driver> v<version> (J. Nilo)` boot banner on probe, visible via
+  `/sys/module/*/version`.
+- `-Warray-compare` silenced in `plat_mem_setup`
+  (`__dtb_start != __dtb_end` → `&__dtb_start[0] != &__dtb_end[0]`).
+
+### Rootfs — BusyBox on Alpine edge patches, binaries rebuilt
+
+- BusyBox 1.37.0 adopts Alpine-edge's downstream patch set
+  (see `33-Rootfs/busybox/ALPINE-PORT.md`). Same version, same applet
+  set, fewer project-local patches.
+- `busybox` and `dropbearmulti` rebuilt against the Alpine-rebased
+  Lexra toolchain.
+
+### Userdata — bridge-aware, image-first flow
+
+- `build_userdata.sh` packages the JFFS2 image from the
+  already-committed skeleton binaries by default — a fresh clone no
+  longer rebuilds nano (~2 min saved, no binary churn in git). Opt into
+  full source rebuild with `--rebuild-components` (boothold + nano +
+  otbr-agent + ot-ctl); `--components-only` used by
+  `build_rtl8196e.sh`. `--jffs2-only` kept as alias for backward compat.
+- Init-script echoes no longer interleave with the kernel log.
+- LED fixes: residual glow on boot, STATUS LED off until a service
+  lights it.
+- `S50uart_bridge` + `S70otbr` aligned on the in-kernel bridge path;
+  otbr-agent uses `spinel+hdlc+uart:///dev/ttyS1` — `CONFIG_IEEE802154`
+  is explicitly NOT required (wpan0 is a TUN; 802.15.4 stack lives in
+  userspace + the EFR32 RCP firmware).
+
+### Bootloader
+
+- `boot.bin` rebuilt with the new toolchain (22 946 → 22 362 B).
+- README's "Modern toolchain" blurb made version-agnostic.
+
+### Flash helpers
+
+- `flash_install_rtl8196e.sh` prereq check: capture `tftp --help`
+  output before grepping, so `set -o pipefail` + tftp-hpa's exit=64
+  don't falsely flag tftp-hpa as missing.
+- `flash_remote.sh kernel` no longer needs `-v` or `KERNEL_VERSION=…`;
+  `flash_kernel.sh` targets `kernel-6.18.img` directly.
+- `build_fullflash.sh` / `create_fullflash.sh` updated to the new image
+  name.
+
+### Documentation
+
+- `POST-MORTEM-6.18.md`: 5.10 → 6.18 arch port (CP0, atomics, cache,
+  clocksource), UART bridge hardening, N+1 divisor investigation.
+- `POST-MORTEM-driver-perf.md`: rtl8196e-eth RX regression hunt.
+- UART bridge source ships with `DESIGN.md`, `README.md`, `SECURITY.md`.
+- `PORT-6.18-STATUS.md` removed — port done.
+- Top-level + 3-Main-SoC + 32-Kernel + ot-br-posix READMEs/CLAUDE.md:
+  single kernel line, `kernel-6.18.img` everywhere, legacy rtl819x
+  reference driver note corrected (dropped with 5.10).
+
+---
+
+## [2.2.0] - 2026-04-10
+
+### Kernel — upgrade to 5.10.252
+
+- **Linux 5.10.246 → 5.10.252**: 6 stable point releases with minor fixes.
+  All 47 custom patches regenerated cleanly against 5.10.252 (4 with trivial
+  line offset changes). Binary size unchanged (+80 bytes on vmlinuz).
+  No relevant CVE for RTL8196E hardware in this range.
+
+### Kernel — RLX4181 patch set cleanup
+
+Audit triggered by the experimental Linux 6.18 port (branch `kernel-6.18`)
+revealed that 3 of our long-standing Lexra patches were either no-ops or
+hitting the wrong file. The 5.10 patch set is reduced from 47 to 45 patches
+with **zero functional change**, and the remaining patches are now
+structurally aligned with what is needed in 6.18.
+
+- **`arch-mips-include-asm-pgtable-32.h.patch` removed**: the wrapper
+  `#if CPU_R3000 || CPU_TX39XX || CPU_RLX4181` it added was a no-op for our
+  build (always-true with `CONFIG_CPU_RLX4181=y`, and the inner branches were
+  identical to the vanilla `#if CONFIG_CPU_R3K_TLB` path). The patch had been
+  carried since the original 3.10 SDK without ever being functionally needed.
+- **`arch-mips-mm-tlbex.c.patch` removed**: it replaced the vanilla
+  `if (cpu_has_3kex)` branch with a `switch (current_cpu_type())` that added
+  an explicit `CPU_RLX4181` case. Because `cpu_has_3kex` is defined as
+  `!cpu_has_4kex` and our `cpu-feature-overrides.h` already forces
+  `cpu_has_4kex=0`, the vanilla path automatically routes RLX4181 to
+  `build_r3000_tlb_refill_handler()`. Same end result, less code.
+- **`arch-mips-kernel-cpu-probe.c.patch` removed and replaced by
+  `arch-mips-kernel-cpu-r3k-probe.c.patch`**: with `select CPU_R3K_TLB`
+  added to the `CPU_RLX4181` Kconfig block (see below), the build now
+  compiles `arch/mips/kernel/cpu-r3k-probe.c` (151 lines, R3K-class CPUs)
+  instead of the much larger `cpu-probe.c` (~1900 lines, all CPUs). The
+  `case PRID_IMP_LX4380` initializing `cputype`, `tlbsize`, `options`, and
+  calling `lexra_cache_init()` moved to `cpu-r3k-probe.c`.
+- **`arch-mips-Kconfig.patch` updated**: `config CPU_RLX4181` now includes
+  `select CPU_R3K_TLB`. This activates the R3K TLB code paths in mainline
+  (TLB exception generator, swap entry format, dump_tlb), which is what we
+  want for the Lexra and which removes the need for the two patches above.
+
+**Result**: 45 patches (was 47), `kernel.img` shrinks by ~4 KiB
+(1 060 864 → 1 056 768 bytes), all vendor drivers and userland behavior
+identical, boot tested on hardware (login prompt, eth0, OTBR).
+
+### Userdata — component upgrades
+
+- **nano 8.3 → 9.0**: text editor update. Binary grows 542 KB → 549 KB (+7 KB)
+  with ncurses 6.6 (was 6.5). No functional impact — nano is a convenience tool
+  for on-device config editing.
+- **ncurses 6.5 → 6.6**: robustness fixes (null pointer checks, bounds checking).
+  No security CVEs.
+- **`build_otbr.sh`**: pinned default to commit `111e78d0` (thread-reference-20250612
+  +327 commits, 2026-04-09) for reproducible builds. Previously defaulted to
+  `main` branch. Script now installs binaries to skeleton automatically,
+  restores working directory on exit, and uses `--single-branch` for faster clone.
+
+### Build — BusyBox build script improvements
+
+- **`build_busybox.sh`**: rewrote argument parsing with proper `case` statement.
+  Added `clean` (remove build tree) and `--help` options. Version argument now
+  validated with regex instead of being treated as default fallback.
+
+### Security — BusyBox hardening
+
+- **Compiler hardening**: added `-D_FORTIFY_SOURCE=2`, `-fstack-protector-strong`,
+  and full RELRO (`-Wl,-z,relro,-z,now`) to BusyBox build. Binary grows +20 KB
+  (714 KB -> 734 KB).
+- **CVE-2023-39810**: enabled `FEATURE_PATH_TRAVERSAL_PROTECTION` to prevent
+  archive extraction outside the target directory (cpio, ar, rpm).
+- **CVE-2025-46394**: sanitize terminal escape sequences in `tar -t` output to
+  prevent filename concealment attacks.
+- **CVE-2026-26157 / CVE-2026-26158**: fix tar hardlink path traversal and
+  incomplete prefix sanitization. Hardlink targets are now stripped like regular
+  filenames (matching GNU tar 1.34 behavior).
+- **CONFIG_LFS=y**: enable Large File Support to match musl's 64-bit `off_t`,
+  fixing 7 format-string warnings and potential truncation of file sizes > 2 GB.
+
+---
+
 ## [2.1.6] - 2026-04-10
 
 ### Fixes

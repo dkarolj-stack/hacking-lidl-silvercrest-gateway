@@ -4,6 +4,134 @@ All notable changes to the EFR32 firmware and tooling are documented here.
 
 ---
 
+## [3.0.0] - 2026-04-16
+
+### UART baud rates — 230400 ceiling removed
+
+The long-standing 230400 baud limit has been eliminated across all
+firmwares. The root cause was an RTL8196E UART divisor N+1 quirk (see
+`3-Main-SoC-Realtek-RTL8196E/32-Kernel/POST-MORTEM-6.18.md`), not
+userspace latency as previously believed.
+
+**Tested baud rates with zero framing/overrun errors:**
+
+| Firmware | Default baud | Max tested | Transport |
+|----------|-------------|------------|-----------|
+| NCP-UART-HW | 115200 | 892857 | in-kernel UART↔TCP bridge |
+| RCP-UART-HW | **460800** | 460800 | cpcd via in-kernel UART↔TCP bridge (cpcd has no 892857 support) |
+| OT-RCP | **460800** | 460800 | otbr-agent (direct UART, on-gateway) |
+| Router | 115200 | N/A | No UART data path |
+
+### 26-OT-RCP
+- **Default baud raised to 460800** — aligns with OpenThread's own
+  default. Firmware, S70otbr init script, docker compose, and all
+  documentation updated. OTBR users get 4× throughput with no
+  configuration change.
+- Pre-built firmware rebuilt at 460800.
+
+### 24-NCP-UART-HW
+- **Firmware rebuilt at 460800** for testing (committed earlier on
+  `kernel-6.18` branch). Default distribution remains 115200; power
+  users can rebuild at up to 892857 and set the in-kernel UART bridge
+  baud to match via `/userdata/etc/radio.conf:BRIDGE_BAUD=`.
+- Z2M `configuration.yaml` updated with `baudrate: 460800`.
+
+### flash_efr32.sh
+- **Flash any firmware from any baud/mode state.** The script now handles
+  all transitions (NCP↔OT-RCP↔RCP) regardless of the current firmware
+  baud rate (115200–892857).
+- **Smart detection via radio.conf**: reads the persistent radio mode
+  (`MODE=otbr` → Spinel@460800) and `BRIDGE_BAUD=` to pick the right
+  probe speed, instead of relying on `ps | grep` (which missed crashed
+  daemons on the old serialgateway-based path).
+- **Targeted probing**: OT-RCP probes `spinel:460800` only (~15ms);
+  NCP/RCP probes `ezsp`+`cpc` at detected baud. No more 30s full scan.
+- **FailedToEnterBootloaderError recovery**: when USF detects the
+  firmware and enters the Gecko Bootloader (baud changes to 115200),
+  the script automatically switches the in-kernel bridge to 115200
+  (flow control off) and flashes via `bootloader:115200`.
+- **TCP port readiness**: `wait_for_port` polls TCP:8888 after every
+  bridge reconfiguration, replacing fragile `sleep 1`. Prevents USF
+  `AssertionError` crashes on unstable connections.
+- **USF probe retry**: transient transport errors (TCP not fully ready)
+  trigger one automatic retry instead of aborting.
+- **radio.conf cleanup**: NCP/RCP/Router flash deletes radio.conf
+  (`rm -f`) instead of leaving a 0-byte ghost file.
+- **USF probe patch regenerated**: all bauds 115200–892857 for EZSP,
+  Spinel, and CPC protocols.
+
+### 25-RCP-UART-HW
+- **RCP@460800 validated**: pre-built firmware rebuilt at 460800 baud.
+  Tested with cpcd 4.5.3 + zigbeed 8.2.2 (EZSP v18) + Z2M. cpcd
+  does not support non-standard bauds (892857), so 460800 is the RCP
+  maximum.
+- **Simplicity SDK 2025.6.2 → 2025.6.3**: zigbeed build updated to
+  latest patch (Feb 2026). End-device move delay config, Green Power
+  fixes. EmberZNet stays 8.2.2 (build 436→532), EZSP v18.
+- **Removed MEMO-uart-bridge-kernel.md** — kept on `kernel-6.18` branch.
+
+### 25-RCP-UART-HW — multipan POC explored, tested, dropped
+
+A Zigbee + Thread multipan Docker stack (cpcd + zigbeed on IID=1 +
+otbr-agent on IID=2) was drafted and added to the tree during v3.0
+dev. End-to-end test on hardware: cpcd connects, zigbeed attaches on
+IID=1 (EZSP v18), but **otbr-agent fails on IID=2** with
+`GetIidListFromUrl: InvalidArgument`. Root cause is a hardware limit —
+Silicon Labs' Concurrent Multiprotocol (CMP, concurrent Zigbee + Thread
+on one radio) is a **Series 2-only** feature; our EFR32MG1B is
+Series 1 and only supports Dynamic Multiprotocol (BLE + one of
+Zigbee/Thread, never both 15.4 protocols together). GSDK 4.5.0 has no
+multi-PAN RCP sample for MG1B.
+
+Since the gateway's hardware will never change, the whole POC was
+dropped: `docker-compose-multipan.yml`,
+`cpcd-zigbeed-otbr/Dockerfile.multiarch`,
+`z2m/configuration-multipan.yaml`, and the CI workflow that built
+`:poc`. A short `cpcd-zigbeed-otbr/README.md` remains as a tombstone
+pointing at the working single-protocol paths
+(Zigbee via `docker-compose-zigbee.yml`, Matter-over-Thread via
+`../../26-OT-RCP/docker/docker-compose-otbr-host.yml`).
+
+### Firmware rebuild against v3.0 sources
+
+All five firmwares rebuilt against the current sources (GSDK 4.5.0 +
+ARM GCC 12.2). Stage 2 bootloader `.gbl`/`.s37`, NCP and Router
+produce **bit-identical binaries** (deterministic build, sources
+unchanged). RCP and OT-RCP pick up a +88 B delta coming from the
+`.slcp` baudrate cleanup below. The Stage 2+Stage 1 combined `.s37`
+sees a small metadata-only delta.
+
+### 25-RCP, 26-OT-RCP — .slcp baudrate realigned with .h override
+
+In `rcp-uart-802154.slcp` and `ot-rcp.slcp`, the `BAUDRATE` config
+value was 115200 at the `.slcp` level but 460800 in the `.h` patches
+that overlay the generated config. The `.h` wins at compile time, so
+runtime was already 460800 — but the two layers disagreeing misled
+anyone reading the `.slcp`. Normalised to 460800 on both; the Silabs
+Configuration Wizard `<i> Default: 115200` hints are kept since they
+legitimately document the upstream SDK default.
+
+### 24-NCP-UART-HW — Z2M device list externalised
+
+- `z2m/configuration.yaml` no longer carries a hard-coded `devices:`
+  block; the list lives in a separate `devices.yaml`. Device-roster
+  updates no longer churn the main config.
+- Unused `baudrate:` dropped from the Z2M config (inherited from the
+  serial adapter URL).
+
+### Tooling
+
+- `25-RCP-UART-HW/patches/measure_uart_overruns.sh` — dev helper that
+  reads UART framing/overrun counters via sysfs during RCP stress tests.
+
+### Documentation
+- All firmware READMEs (24-NCP, 25-RCP, 26-OT-RCP, 27-Router) updated:
+  replaced "460800+ not supported" with full baud rate table; removed
+  all references to in-kernel UART bridge.
+- EMBERZNET-8.x-GUIDE.md: removed "overruns" warning.
+
+---
+
 ## [2.1.5] - 2026-04-04
 
 ### 26-OT-RCP (OTBR on gateway)

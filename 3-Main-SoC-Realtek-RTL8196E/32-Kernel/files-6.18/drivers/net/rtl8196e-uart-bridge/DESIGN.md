@@ -1,0 +1,228 @@
+# rtl8196e-uart-bridge — design notes
+
+This document explains what the driver does, why it exists, and the key
+choices that shaped the stabilised code in
+`rtl8196e_uart_bridge_main.c`. The companion operator reference is
+[`README.md`](README.md); the SSH-tunnel hardening recipe lives in
+[`SECURITY.md`](SECURITY.md).
+
+## Scope
+
+The bridge carries bytes between `/dev/ttyS1` (UART1 on the RTL8196E)
+and a single TCP client on port 8888 of the gateway. It is the single
+shared transport for **every** host ↔ radio conversation:
+
+| Gateway-side firmware | Host-side client | Protocol over the bridge |
+|---|---|---|
+| NCP-UART-HW (EmberZNet 7.5.1) | Z2M / ZHA | EZSP v13 |
+| RCP-UART-HW (802.15.4) | `cpcd` → `zigbeed` | CPC (Zigbee or Thread) |
+| OT-RCP (OpenThread) | `otbr-agent` | Spinel-over-CPC |
+
+Anything that talked to the radio over the former userspace
+`serialgateway` now talks to the bridge on the same TCP endpoint. The
+host-side stack does not care which kernel-side path ships the bytes;
+the transport is the same.
+
+## Why the old userspace path hit a wall
+
+Pre-v3.0 the same shovel role was fulfilled by `serialgateway`, a
+~520 LOC userspace daemon looping `read(tty)` / `write(tcp)` and
+vice-versa. On a 400 MHz Lexra RLX4181 (single core, no SMP, no
+hardware integer divide), each byte batch crossed the user/kernel
+boundary four times and relied on the scheduler waking the daemon
+within a tight window set by the 16-byte UART RX FIFO.
+
+At 460 800 baud the wire delivers a byte every 21.7 µs, leaving
+roughly 170 µs to drain eight freshly filled FIFO slots before an
+overrun is latched. In practice the daemon started missing that
+window intermittently under load — `/proc/tty/driver/serial` showed
+non-zero `oe:` counts, and the ASH / CPC stack above it reacted with
+retransmits or outright disconnects. Above 460 800 the problem became
+reliably reproducible.
+
+The userspace design could be micro-tuned (wake priorities, pinned
+memory, larger reads) but any serious fix had to remove the context
+switches, not make them faster.
+
+## The kernel-side shovel
+
+The driver forwards bytes entirely in kernel context:
+
+```
+ UART1 RX -> 8250 ISR -> tty flip buffer -> bridge receive_buf()
+                                             -> kernel_sendmsg(TCP)
+
+ TCP RX   -> bridge worker kthread
+                                             -> tty->ops->write(UART1 TX)
+```
+
+### Hook point: `tty_port.client_ops` override, not a line discipline
+
+An earlier prototype used a line discipline. It worked, but two things
+made us move the hook one level down:
+
+1. **`receive_room` ate bytes.** The default ldisc path consults a
+   per-ldisc `receive_room` budget before delivering data from the flip
+   buffer. When the TCP sendmsg was slow for any reason (client side
+   slow-reader, short burst of congestion) the ldisc would silently
+   drop characters that our code would have happily swallowed into the
+   `drops_err` counter.
+2. **Extra ldisc reference-counting round-trip** on every flip-buffer
+   flush with no real ldisc behaviour to justify it.
+
+The bridge instead overrides `tty_port->client_ops` and installs its
+own `receive_buf`, bypassing `tty_port_default_receive_buf` and the
+ldisc layer entirely. The received bytes are forwarded to the TCP
+socket with `MSG_DONTWAIT`; the return value back to the tty core is
+always the full `count` (bytes are accounted for in the driver's drop
+counters, not fed back as flow-control pressure to the flip buffer).
+
+### Single kthread for TCP accept/recv
+
+The TX direction (TCP → UART) runs in one kernel thread that blocks in
+`kernel_accept()` then `kernel_recvmsg()`, and writes the received
+bytes into the UART via the existing `tty->ops->write` path. This is
+the minimal amount of concurrency the driver needs: one thread per
+listen socket, one client at a time.
+
+### Single-client listener
+
+The radio has exactly one consumer at any given moment — Z2M, `cpcd`,
+or `otbr-agent`. Supporting multiple simultaneous TCP clients would
+require duplicating the byte stream and tracking per-client state in a
+path that already runs on a tight CPU budget. The bridge accepts one,
+refuses additional connects until the first closes, and stops worrying
+about it. Clients that reconnect immediately after a disconnect simply
+win the next `kernel_accept()`.
+
+### Sysfs-only control interface
+
+All knobs (`tty`, `baud`, `port`, `bind_addr`, `flow_control`,
+`enable`) are exposed as module parameters under
+`/sys/module/rtl8196e_uart_bridge/parameters/`. Writes are applied
+live — the set callbacks teardown and rebuild only the subsystem they
+touch (e.g. changing `baud` reconfigures `ktermios` without dropping
+the TCP client; changing `bind_addr` rebuilds the listen socket but
+keeps the connected client). This avoids shipping a userspace tool
+just to control the bridge and makes every setting scriptable from
+`/etc/init.d`.
+
+### `enable = 0` at load, armed by init script
+
+The module loads unconditionally with the kernel but does nothing
+until an init script — `S50uart_bridge` in the userdata overlay —
+writes `enable=1` once `/dev/ttyS1` is known to exist. This avoids
+the auto-arm race where the bridge would try to open the tty before
+the 8250 driver had created the device node. The init script also
+pulls `BRIDGE_BAUD` and `BRIDGE_BIND` from `/userdata/etc/radio.conf`
+before arming, so the operator's persistent choices land on every
+boot without a second tool.
+
+### STATUS LED fired from the worker, not from userspace
+
+Pre-v3.0, the userspace `serialgateway` daemon wrote
+`/sys/class/leds/status/brightness` directly from its TCP accept and
+disconnect paths. Moving the shovel into the kernel lost that hook,
+so operators reported the STATUS LED staying off in Zigbee mode even
+when Z2M was connected.
+
+The bridge restores it via the Linux LED-trigger subsystem:
+
+- At module init the driver registers a trigger named
+  `uart-bridge-client` (`led_trigger_register_simple()`).
+- On `kernel_accept()` success the worker fires the trigger at the
+  brightness stored in `status_led_brightness` (clamped to 0-255).
+- On disconnect and on disarm the worker fires the trigger at 0.
+
+Userspace binds the trigger to the actual LED with
+`echo uart-bridge-client > /sys/class/leds/status/trigger`; the init
+script `S50uart_bridge` does this at boot and also maps the eth0
+`led_mode` (bright/dim/off) to 255/60/0 for the brightness. The
+coupling between the bridge and the LED class goes only through the
+well-defined trigger API — no direct sysfs access from kernel, no
+hard-coded device names beyond the trigger label.
+
+Changing `status_led_brightness` while a client is already connected
+does not update the LED live; the new value takes effect on the next
+connect. That's intentional: an operator changing the brightness is
+usually tuning things up, not trying to flicker the LED on a running
+session.
+
+### Runtime flow-control flip for flash mode
+
+The Gecko Bootloader's Xmodem upload uses 115200 baud with hardware
+flow control **off**. A flash ends up temporarily re-purposing the
+same UART/TCP path, so the bridge exposes `flow_control` as a writable
+sysfs knob. `flash_efr32.sh` flips it to `0` for the transfer and
+back to `1` afterwards; the bridge stays armed throughout and the TCP
+listen socket never drops, so nothing on the host side has to
+reconnect.
+
+## Options considered and dropped
+
+- **Placing the hot path in IRAM.** Early scoping assumed we would
+  need the 16 KB on-chip instruction SRAM that the Lexra kernel
+  already uses for the Ethernet RX path. Once the plain-text kernel
+  build shipped, hardware measurements at 892 857 baud under a
+  multi-hour soak showed zero framing/overrun errors and no packet
+  drops. The IRAM work was shelved as unnecessary complexity.
+
+- **Multi-client fan-out.** A version that duplicated RX to every
+  connected client was prototyped on paper. It would require per-client
+  send queues, back-pressure accounting per client, and a policy for
+  what happens when a slow client causes a fast one to starve. No
+  workflow on the gateway actually benefits from fan-out — one
+  supervisor per radio is the norm. Dropped.
+
+- **Netlink control plane.** Considered as an alternative to sysfs.
+  Rejected because it would require a userspace client library and
+  provide no functionality the sysfs knobs don't already cover. The
+  init script is a three-line shell fragment, not a daemon.
+
+- **Keeping the line discipline.** See above — `receive_room`
+  behaviour and the extra ldisc round-trip were both net negatives
+  for our use case, and we have no consumer of ldisc features
+  (canonical mode, signals, echo) since both sides of the wire speak
+  framed binary protocols.
+
+## Stability properties
+
+- **Throughput:** 892 857 baud (the N+1 divisor maximum on this SoC)
+  sustained with the bridge armed and a Z2M EZSP client loaded with
+  a representative Zigbee network. Kernel 8250 stats show `fe=0 oe=0`
+  over multi-hour soaks; bridge `drops_*` counters stay at 0.
+- **Lower bauds:** 115 200 (baseline NCP/RCP/Router/OT-RCP), 230 400,
+  460 800, 691 200 validated on the same setup.
+- **Live reconfiguration:** baud, bind address, flow control, listen
+  port can all be changed on the running bridge without dropping the
+  TCP client (except `bind_addr` and `port`, which rebuild the listen
+  socket; an already-connected client is not affected).
+- **Boot ordering:** the module is built-in and loads with `enable=0`;
+  the init script defers arming until after the 8250 probe has
+  published `/dev/ttyS1`. The serialgateway-era race between daemon
+  startup and tty availability is structurally gone.
+- **Hot path cost (UART -> TCP):** `bridge_port_receive_buf()` takes
+  `bridge_lock` and calls `kernel_sendmsg()` while holding it. An
+  early audit flagged this mutex as a potential bottleneck at high
+  baud; measured cost is negligible. An EZSP `echo` flood at 892 857
+  baud drove the path ~3 500 calls/s for 30 s with **0 `drops_err`,
+  0 `drops_tx`, 0 UART framing/overrun errors**. The worker kthread
+  consumed ~2.5 % CPU, total system load ~19 %, ~81 % idle. Average
+  per-call mutex cost ≈ 8 µs, which leaves plenty of headroom even
+  if the line ever approached its ~89 kB/s ceiling. The mutex is
+  kept as-is: no refactor to a spinlock or a lock-free queue is
+  warranted.
+
+## What this driver does not do
+
+- No TLS, no auth. A reachable TCP port is a direct EZSP/CPC/Spinel
+  session. For untrusted networks, bind to loopback and tunnel over
+  SSH — see `SECURITY.md`.
+- No buffering beyond what the UART FIFO, tty flip buffer, and TCP
+  socket provide. There is no in-bridge replay/queue if the client
+  disconnects mid-frame; the upper-layer protocol (ASH for EZSP, CPC
+  for RCP/OT-RCP) is responsible for recovery.
+- No multi-PAN / multiplexing. One radio, one UART, one TCP client at
+  a time. Multi-PAN concurrency is handled host-side by `zigbeed` +
+  `otbr-agent` sharing the same RCP via `cpcd`, which in turn is the
+  single TCP client on our end.

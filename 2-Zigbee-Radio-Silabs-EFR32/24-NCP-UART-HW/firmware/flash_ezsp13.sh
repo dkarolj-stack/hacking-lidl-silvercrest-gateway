@@ -47,9 +47,14 @@ cat > /tmp/firmware_package.tar
 cd /tmp
 tar -xf firmware_package.tar
 
-# Make the sx file executable & kill serialgateway if running
+# Make the sx file executable & disarm the in-kernel UART bridge so we
+# can drive /dev/ttyS1 directly from this shell (the bridge exclusively
+# holds the tty_port when armed).
 chmod +x sx
-killall -q serialgateway
+if [ -d /sys/module/rtl8196e_uart_bridge/parameters ]; then
+    echo 0 > /sys/module/rtl8196e_uart_bridge/parameters/enable
+fi
+trap 'if [ -d /sys/module/rtl8196e_uart_bridge/parameters ]; then echo 1 > /sys/module/rtl8196e_uart_bridge/parameters/enable; fi' EXIT
 
 # Configure serial port and send commands
 stty -F /dev/ttyS1 115200 cs8 -cstopb -parenb -ixon crtscts raw

@@ -36,13 +36,13 @@ echo "Checking RCP endpoint: $host:$port ..." >&2
 if command -v nc >/dev/null 2>&1; then
   if ! nc -z -w "$timeout" "$host" "$port" 2>/dev/null; then
     echo "error: Cannot connect to RCP endpoint $host:$port (timeout ${timeout}s)" >&2
-    echo "Is the gateway powered on and serialgateway running?" >&2
+    echo "Is the gateway powered on and the UART bridge armed?" >&2
     exit 1
   fi
 elif [ -e /dev/tcp ]; then
   if ! timeout "$timeout" bash -c "echo >/dev/tcp/$host/$port" 2>/dev/null; then
     echo "error: Cannot connect to RCP endpoint $host:$port (timeout ${timeout}s)" >&2
-    echo "Is the gateway powered on and serialgateway running?" >&2
+    echo "Is the gateway powered on and the UART bridge armed?" >&2
     exit 1
   fi
 else

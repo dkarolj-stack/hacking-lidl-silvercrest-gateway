@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: GPL-2.0
+config RTL8196E_UART_BRIDGE
+	bool "Realtek RTL8196E in-kernel UART<->TCP bridge"
+	depends on MIPS && SERIAL_8250 && INET
+	help
+	  In-kernel byte shoveler between a TTY port (typically /dev/ttyS1,
+	  the link to the Silabs EFR32 Zigbee/Thread radio) and a listening
+	  TCP socket. Replaces the userspace serialgateway daemon so the hot
+	  path can live in instruction SRAM (IRAM) and run without any user
+	  context switch, which is required to sustain 460800 baud on the
+	  Lexra RLX4181.
+
+	  Protocol-agnostic: forwards raw bytes in both directions, used by
+	  EZSP (NCP), CPC (RCP), and Spinel (OT-RCP) clients alike.
+
+	  Must be built in (=y), not as a module. The IRAM gather in
+	  vmlinux.lds.S only collects the .iram section from built-in code;
+	  loadable modules keep their hot path in cached DRAM and defeat the
+	  whole point of the driver.
+
+	  If unsure, say N.

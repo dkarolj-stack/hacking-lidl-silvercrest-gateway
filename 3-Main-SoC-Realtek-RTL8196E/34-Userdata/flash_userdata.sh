@@ -113,7 +113,7 @@ elif [ -n "${RADIO_MODE:-}" ]; then
 else
     echo ""
     echo "Radio mode (EFR32 firmware must match):"
-    echo "  [1] Zigbee — serialgateway on port 8888 (NCP or RCP+zigbeed)"
+    echo "  [1] Zigbee — in-kernel UART bridge on port 8888 (NCP or RCP+zigbeed)"
     echo "  [2] Thread — OTBR border router, REST API on port 8081 (OT-RCP)"
     read -r -p "Choice [1]: " radio_choice
     radio_choice="${radio_choice:-1}"
@@ -125,7 +125,7 @@ if [ "${RADIO_MODE:-}" != "skip" ]; then
         echo "→ Thread Border Router (otbr-agent)"
     else
         rm -f "$RADIO_CONF"
-        echo "→ Zigbee (serialgateway)"
+        echo "→ Zigbee (in-kernel UART bridge)"
     fi
 fi
 

@@ -27,7 +27,7 @@ The Linux system acts as a **bridge** between the Zigbee coprocessor (Silabs EFR
     +--------------+
 ```
 
-The **serialgateway** tool exposes the Zigbee serial port over TCP, allowing remote hosts to communicate with the Zigbee radio.
+The **in-kernel UART↔TCP bridge** (`rtl8196e-uart-bridge`, part of the 6.18 kernel) exposes the Zigbee serial port over TCP, allowing remote hosts to communicate with the Zigbee radio. It replaces the former `serialgateway` userspace daemon from v3.0.
 
 ---
 
@@ -59,9 +59,9 @@ cd hacking-lidl-silvercrest-gateway/3-Main-SoC-Realtek-RTL8196E
 
 | Image | File | Size | Description |
 |-------|------|------|-------------|
-| Kernel | [`32-Kernel/kernel.img`](./32-Kernel/README.md) | ~1 MB | Linux 5.10 kernel |
+| Kernel | [`32-Kernel/kernel-6.18.img`](./32-Kernel/README.md) | ~1.2 MB | Linux 6.18 kernel |
 | Root FS | [`33-Rootfs/rootfs.bin`](./33-Rootfs/README.md) | ~900 KB | Base system (BusyBox, Dropbear) |
-| Userdata | [`34-Userdata/userdata.bin`](./34-Userdata/README.md) | ~12 MB | Apps (nano, serialgateway) |
+| Userdata | [`34-Userdata/userdata.bin`](./34-Userdata/README.md) | ~12 MB | Apps (nano, otbr-agent, boothold) |
 
 > **Note:** The userdata image is 12 MB because it must fill the entire JFFS2 partition to avoid filesystem errors at boot. The actual data is only ~1 MB.
 
@@ -133,7 +133,7 @@ NET_MODE=static RADIO_MODE=zigbee CONFIRM=y ./flash_userdata.sh  # Full non-inte
 | Serial console | 38400 8N1 on `/dev/ttyUSB0` |
 | SSH | Port 22 (Dropbear) |
 | Default user | `root` (password: `root`) |
-| Zigbee bridge | TCP port 8888 (serialgateway) |
+| Zigbee bridge | TCP port 8888 (in-kernel `rtl8196e-uart-bridge`) |
 
 ### Configuration
 
@@ -222,8 +222,9 @@ echo MODE=bright > /userdata/etc/leds.conf
 /userdata/etc/init.d/S11leds start
 ```
 
-The setting is applied automatically at every boot. `serialgateway` and
-`otbr-agent` read the mode automatically when they turn the STATUS LED on.
+The setting is applied automatically at every boot. The `S50uart_bridge` init
+script (Zigbee mode) and `otbr-agent` (Thread mode) read the mode automatically
+when they turn the STATUS LED on.
 
 ### Connect to Zigbee2MQTT
 
@@ -285,7 +286,6 @@ docker run -it --rm -v $(pwd):/workspace lidl-gateway-builder
 
 # Build userdata components
 ./34-Userdata/nano/build_nano.sh
-./34-Userdata/serialgateway/build_serialgateway.sh
 ./34-Userdata/build_userdata.sh
 
 # Build kernel
@@ -303,19 +303,19 @@ After building, flash the images as described in [Option 1](#flashing).
 | [1-Build-Environment](../1-Build-Environment/README.md) | Toolchain, tools, and build setup |
 | [30-Backup-Restore](./30-Backup-Restore/README.md) | Backup and restore the flash memory |
 | [31-Bootloader](./31-Bootloader/README.md) | Realtek bootloader analysis |
-| [32-Kernel](./32-Kernel/README.md) | Linux 5.10 kernel with patches |
+| [32-Kernel](./32-Kernel/README.md) | Linux 6.18 kernel with patches |
 | [33-Rootfs](./33-Rootfs/README.md) | Root filesystem (BusyBox, Dropbear SSH) |
-| [34-Userdata](./34-Userdata/README.md) | User partition (nano, serialgateway) |
+| [34-Userdata](./34-Userdata/README.md) | User partition (nano, otbr-agent, boothold) |
 
 ---
 
 ## Features
 
-- **Linux 5.10** kernel with full RTL8196E support
+- **Linux 6.18** kernel with full RTL8196E support
 - **BusyBox** with 100+ applets (ash, vi, wget, etc.)
 - **Dropbear** SSH server for remote access
 - **nano** text editor for easy configuration
-- **serialgateway** to expose Zigbee UART over TCP
+- **In-kernel UART↔TCP bridge** (`rtl8196e-uart-bridge`) to expose Zigbee UART over TCP:8888
 - **JFFS2** writable userdata partition
 - **NTP** time synchronization
 - **Terminfo** support for proper terminal handling
@@ -326,7 +326,7 @@ After building, flash the images as described in [Option 1](#flashing).
 
 The RTL8196E is a MIPS-based SoC with a Lexra core (a MIPS variant without certain instructions like `lwl`, `lwr`, `swl`, `swr`). The stock firmware runs Linux 3.10 with proprietary Realtek SDK components.
 
-This project provides a **modern Linux 5.10 system** built entirely from source:
+This project provides a **modern Linux 6.18 system** built entirely from source:
 
 - Custom toolchain supporting the Lexra architecture
 - Patched kernel with full RTL8196E support

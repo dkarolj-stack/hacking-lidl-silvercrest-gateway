@@ -1,5 +1,5 @@
 #!/bin/bash
-# build_toolchain.sh — Build Lexra MIPS toolchain with crosstool-ng and Musl 1.2.5
+# build_toolchain.sh — Build Lexra MIPS toolchain with crosstool-ng
 #
 # This script automates the complete toolchain build process including:
 #   - Patch deployment to ~/.crosstool-ng/
@@ -59,9 +59,10 @@ cp -f -a "${SCRIPT_DIR}/patches" ~/.crosstool-ng/
 echo "Patches deployed"
 echo ""
 
-# Create temporary build directory
+# Create temporary build directory (kept on failure for inspection)
 BUILD_DIR=$(mktemp -d)
-trap "rm -rf $BUILD_DIR" EXIT
+cleanup() { [ $? -eq 0 ] && rm -rf "$BUILD_DIR" || echo "Build dir kept for inspection: $BUILD_DIR"; }
+trap cleanup EXIT
 
 cd "$BUILD_DIR"
 echo "Build directory: $BUILD_DIR"

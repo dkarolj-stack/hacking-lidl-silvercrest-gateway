@@ -1,23 +1,34 @@
 #!/bin/bash
 # build_userdata.sh — Build JFFS2 userdata partition for RTL8196E
 #
-# This script:
-#   - Builds nano editor + serialgateway (unless --jffs2-only)
-#   - Creates JFFS2 filesystem from skeleton/ directory
-#   - Converts to RTL bootloader format with cvimg
+# By default, this script packages the JFFS2 image from the binaries already
+# committed in skeleton/usr/bin/ — boothold, nano, otbr-agent, ot-ctl, vi.
+# It does NOT rebuild those binaries in the default flow.
+#
+# To rebuild all userland binaries (boothold, nano, otbr-agent, ot-ctl) from
+# source, pass --rebuild-components (full flow) or --components-only (skip
+# the image). The ot-br-posix step clones a large upstream tree and can take
+# ~30 min on first run.
+#
+# The UART<->TCP bridge (formerly userspace serialgateway) is now in-kernel
+# (CONFIG_RTL8196E_UART_BRIDGE=y in the 6.18 kernel); nothing to build here.
 #
 # Usage:
-#   ./build_userdata.sh                       # Build nano + serialgateway + JFFS2
-#   ./build_userdata.sh --jffs2-only          # Build JFFS2 only (no compile)
+#   ./build_userdata.sh                       # Package image from skeleton (default)
+#   ./build_userdata.sh --rebuild-components  # Rebuild all components, then image
+#   ./build_userdata.sh --components-only     # Rebuild all components, skip image
+#   ./build_userdata.sh --jffs2-only          # Alias of default (used by flash scripts)
 #   ./build_userdata.sh --jffs2-only -q       # Quiet mode (used by build_fullflash)
 #
-# Available components:
+# Rebuilt on --rebuild-components / --components-only:
 #   +-----------------+----------------------------------------------+-------------+
 #   | Component       | Source                                       | License     |
 #   +-----------------+----------------------------------------------+-------------+
+#   | boothold        | boothold/src/boothold.c (local)              | MIT         |
 #   | nano            | https://www.nano-editor.org/                 | GPL-3.0     |
-#   | serialgateway   | https://github.com/banksy-git/lidl-gateway-freedom | GPL-3.0 |
 #   | ncursesw        | https://ftp.gnu.org/gnu/ncurses/             | MIT         |
+#   | otbr-agent      | https://github.com/openthread/ot-br-posix    | BSD-3       |
+#   | ot-ctl          | (same as otbr-agent)                         | BSD-3       |
 #   +-----------------+----------------------------------------------+-------------+
 #
 # Note: vi is a symlink to nano (OpenVi doesn't support UTF-8/emojis)
@@ -34,14 +45,29 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="${SCRIPT_DIR}/.."
 INSTALL_DIR="${SCRIPT_DIR}/skeleton/usr/bin"
 
-BUILD_COMPONENTS=1
+# Default: package the JFFS2 image from the binaries committed in skeleton/
+# (boothold, nano, otbr-agent, ot-ctl, vi → nano). Rebuilding those binaries
+# is opt-in via --rebuild-components (full flow) or --components-only (no image).
+BUILD_COMPONENTS=0
+BUILD_IMAGE=1
 QUIET=0
 
 # Parse arguments
 for arg in "$@"; do
     case $arg in
         --jffs2-only)
+            # Kept for backward compatibility with flash_userdata.sh,
+            # build_fullflash.sh and create_fullflash.sh — same as default.
             BUILD_COMPONENTS=0
+            BUILD_IMAGE=1
+            ;;
+        --rebuild-components)
+            BUILD_COMPONENTS=1
+            BUILD_IMAGE=1
+            ;;
+        --components-only)
+            BUILD_COMPONENTS=1
+            BUILD_IMAGE=0
             ;;
         -q|--quiet)
             QUIET=1
@@ -49,14 +75,20 @@ for arg in "$@"; do
         --help|-h)
             echo "Usage: $0 [options]"
             echo ""
-            echo "Options:"
-            echo "  --jffs2-only     Build JFFS2 only (assumes binaries exist)"
-            echo "  -q, --quiet      Suppress non-essential output"
-            echo "  --help, -h       Show this help"
+            echo "Default: package the JFFS2 image from the binaries already in"
+            echo "skeleton/usr/bin/ (tracked in git)."
             echo ""
-            echo "Components built:"
-            echo "  nano             GNU nano editor (with vi symlink)"
-            echo "  serialgateway    TCP-to-serial bridge for Zigbee"
+            echo "Options:"
+            echo "  --rebuild-components   Rebuild boothold + nano, then package the image"
+            echo "  --components-only      Rebuild boothold + nano, skip the image"
+            echo "  --jffs2-only           Alias of the default (kept for flash scripts)"
+            echo "  -q, --quiet            Suppress non-essential output"
+            echo "  --help, -h             Show this help"
+            echo ""
+            echo "Rebuilt when --rebuild-components / --components-only is set:"
+            echo "  boothold           Static helper to reboot into bootloader"
+            echo "  nano               GNU nano editor (with vi symlink)"
+            echo "  otbr-agent+ot-ctl  OpenThread Border Router (~30 min on first run)"
             exit 0
             ;;
         *)
@@ -67,34 +99,39 @@ for arg in "$@"; do
     esac
 done
 
-# Check that fakeroot is installed
-if ! command -v fakeroot >/dev/null 2>&1; then
-    echo "fakeroot is not installed"
-    echo "   Installation: sudo apt-get install fakeroot"
-    exit 1
-fi
+# Checks required only for the image-creation stage
+if [ "$BUILD_IMAGE" -eq 1 ]; then
+    # Check that fakeroot is installed.
+    # Errors go to stderr so they survive when this script is invoked with stdout
+    # redirected to /dev/null (build_fullflash.sh -q, called by flash_install_rtl8196e.sh).
+    if ! command -v fakeroot >/dev/null 2>&1; then
+        echo "fakeroot is not installed" >&2
+        echo "   Installation: sudo apt-get install fakeroot" >&2
+        exit 1
+    fi
 
-# Check that cvimg is available, build it if missing
-BUILD_ENV="${PROJECT_ROOT}/../1-Build-Environment/11-realtek-tools"
-CVIMG_TOOL="${BUILD_ENV}/bin/cvimg"
-if [ ! -f "$CVIMG_TOOL" ]; then
-    echo "cvimg not found — building it..."
-    if ! command -v gcc >/dev/null 2>&1; then
-        echo "Error: gcc not found (needed to compile cvimg)." >&2
-        echo "Install it with: sudo apt install gcc" >&2
-        exit 1
+    # Check that cvimg is available, build it if missing
+    BUILD_ENV="${PROJECT_ROOT}/../1-Build-Environment/11-realtek-tools"
+    CVIMG_TOOL="${BUILD_ENV}/bin/cvimg"
+    if [ ! -f "$CVIMG_TOOL" ]; then
+        echo "cvimg not found — building it..."
+        if ! command -v gcc >/dev/null 2>&1; then
+            echo "Error: gcc not found (needed to compile cvimg)." >&2
+            echo "Install it with: sudo apt install gcc" >&2
+            exit 1
+        fi
+        CVIMG_SRC="${BUILD_ENV}/cvimg/cvimg.c"
+        if [ ! -f "$CVIMG_SRC" ]; then
+            echo "Error: cvimg source not found at ${CVIMG_SRC}" >&2
+            exit 1
+        fi
+        mkdir -p "${BUILD_ENV}/bin"
+        gcc -std=c99 -Wall -O2 -D_GNU_SOURCE -o "$CVIMG_TOOL" "$CVIMG_SRC" || {
+            echo "Error: failed to compile cvimg" >&2
+            exit 1
+        }
+        echo "cvimg built."
     fi
-    CVIMG_SRC="${BUILD_ENV}/cvimg/cvimg.c"
-    if [ ! -f "$CVIMG_SRC" ]; then
-        echo "Error: cvimg source not found at ${CVIMG_SRC}" >&2
-        exit 1
-    fi
-    mkdir -p "${BUILD_ENV}/bin"
-    gcc -std=c99 -Wall -O2 -D_GNU_SOURCE -o "$CVIMG_TOOL" "$CVIMG_SRC" || {
-        echo "Error: failed to compile cvimg" >&2
-        exit 1
-    }
-    echo "cvimg built."
 fi
 
 cd "${SCRIPT_DIR}"
@@ -106,14 +143,25 @@ if [ "$BUILD_COMPONENTS" -eq 1 ]; then
     echo "========================================="
     echo "  BUILDING USERDATA COMPONENTS"
     echo "========================================="
-    echo ""
-    echo "  Editor: nano (with vi symlink)"
-    echo "  Serial: serialgateway"
+    echo "  boothold          reboot-to-bootloader helper"
+    echo "  nano              editor (with vi symlink)"
+    echo "  otbr-agent+ot-ctl OpenThread Border Router (~30 min on first run)"
     echo ""
 
-    # Clean previous binaries
+    # Build boothold
+    echo "========================================="
+    echo "  BUILDING BOOTHOLD"
+    echo "========================================="
+    if [ -x "${SCRIPT_DIR}/boothold/build_boothold.sh" ]; then
+        "${SCRIPT_DIR}/boothold/build_boothold.sh"
+    else
+        echo "Error: boothold/build_boothold.sh not found or not executable"
+        exit 1
+    fi
+    echo ""
+
+    # Clean previous nano binaries, then rebuild
     rm -f "${INSTALL_DIR}/nano" "${INSTALL_DIR}/vi"
-    rm -f "${INSTALL_DIR}/serialgateway"
 
     # Build nano (creates vi symlink)
     echo "========================================="
@@ -127,17 +175,27 @@ if [ "$BUILD_COMPONENTS" -eq 1 ]; then
     fi
     echo ""
 
-    # Build serialgateway
+    # Build ot-br-posix (otbr-agent + ot-ctl)
     echo "========================================="
-    echo "  BUILDING SERIALGATEWAY"
+    echo "  BUILDING OT-BR-POSIX"
     echo "========================================="
-    if [ -x "${SCRIPT_DIR}/serialgateway/build_serialgateway.sh" ]; then
-        "${SCRIPT_DIR}/serialgateway/build_serialgateway.sh"
+    if [ -x "${SCRIPT_DIR}/ot-br-posix/build_otbr.sh" ]; then
+        "${SCRIPT_DIR}/ot-br-posix/build_otbr.sh"
     else
-        echo "Error: serialgateway/build_serialgateway.sh not found or not executable"
+        echo "Error: ot-br-posix/build_otbr.sh not found or not executable"
         exit 1
     fi
     echo ""
+fi
+
+# Stop here if the caller asked for components only
+if [ "$BUILD_IMAGE" -eq 0 ]; then
+    log "========================================="
+    log "  USERDATA COMPONENTS READY"
+    log "========================================="
+    log ""
+    log "Binaries staged in: ${INSTALL_DIR}"
+    exit 0
 fi
 
 log "========================================="
@@ -214,8 +272,7 @@ log "========================================="
 log "  BUILD SUMMARY"
 log "========================================="
 if [ "$BUILD_COMPONENTS" -eq 1 ] && [ "$QUIET" -eq 0 ]; then
-    echo "  Editor: nano (vi -> nano symlink)"
-    echo "  Serial: serialgateway"
+    echo "  Components: boothold, nano (vi -> nano symlink), otbr-agent, ot-ctl"
 fi
 log ""
 if [ "$QUIET" -eq 0 ]; then

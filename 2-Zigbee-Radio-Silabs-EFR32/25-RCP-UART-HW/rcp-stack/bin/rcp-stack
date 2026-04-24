@@ -68,7 +68,7 @@ ensure_env() {
     cat >"$ENV_FILE" <<EOF
 # rcp-stack configuration
 #
-# Required: virtual RCP endpoint (TCP) exposed by serialgateway
+# Required: virtual RCP endpoint (TCP) exposed by the in-kernel UART bridge
 # RCP_ENDPOINT=tcp://ip_adress:8888
 #
 # Required: command lines. Use the helper vars provided by the units:

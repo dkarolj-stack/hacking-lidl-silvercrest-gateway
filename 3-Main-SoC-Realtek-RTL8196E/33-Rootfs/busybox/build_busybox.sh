@@ -2,13 +2,14 @@
 # build_busybox.sh — Build BusyBox (MIPS) for RTL8196E against musl library
 #
 # Usage:
-#   ./build_busybox.sh [version] [menuconfig]
+#   ./build_busybox.sh [version] [menuconfig] [clean]
 #
 # Examples:
 #   ./build_busybox.sh                    # Build with default version (1.37.0)
 #   ./build_busybox.sh menuconfig         # Default version + interactive config
 #   ./build_busybox.sh 1.36.1             # Build specific version
 #   ./build_busybox.sh 1.36.1 menuconfig  # Specific version + interactive config
+#   ./build_busybox.sh clean              # Remove build tree and rebuild
 #   BB_VER=1.36.0 ./build_busybox.sh      # Version via environment variable
 #
 # Configuration files:
@@ -19,10 +20,12 @@
 #   This allows customizing options for a specific BusyBox version while keeping
 #   a common base configuration.
 #
-# Patches applied automatically:
-#   1. include/libbb.h        - Disable off_t size check (musl MIPS compatibility)
-#   2. scripts/generate_BUFSIZ.sh - PAGE_SIZE fallback (cross-compilation fix)
-#   3. libbb/update_passwd.c  - Suppress fcntl lock warning (JFFS2 compatibility)
+# Patches (applied in alphabetical order from patches/):
+#   001-017 alpine-*       - Alpine edge patch set (CVE backports, bugfixes, hardening)
+#   800-802 CVE-*          - CVEs not covered by Alpine (path traversal framework +
+#                            hardlink/symlink tar traversal fixes)
+#   900-903 Lexra-*        - Platform adaptations: musl off_t size check, cross-compile
+#                            PAGE_SIZE, JFFS2 fcntl lock, FORTIFY_SOURCE write() check
 
 set -e
 
@@ -32,19 +35,37 @@ ROOTFS_PART="${SCRIPT_DIR}/.."
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
 # Parse arguments
-if [ "$1" = "menuconfig" ]; then
-  BB_VER="${BB_VER:-1.37.0}"
-  MENUCONFIG="menuconfig"
-elif [ -n "$1" ] && [ "$2" = "menuconfig" ]; then
-  BB_VER="$1"
-  MENUCONFIG="menuconfig"
-elif [ -n "$1" ]; then
-  BB_VER="$1"
-  MENUCONFIG=""
-else
-  BB_VER="${BB_VER:-1.37.0}"
-  MENUCONFIG=""
-fi
+MENUCONFIG=""
+DO_CLEAN=false
+
+for arg in "$@"; do
+  case "$arg" in
+    menuconfig) MENUCONFIG="menuconfig" ;;
+    clean)      DO_CLEAN=true ;;
+    -h|--help)
+      echo "Usage: $0 [version] [menuconfig] [clean]"
+      echo ""
+      echo "  (none)      Build with default version (1.37.0)"
+      echo "  VERSION     Build specific version (e.g. 1.36.1)"
+      echo "  menuconfig  Open interactive configuration"
+      echo "  clean       Remove build tree and rebuild from scratch"
+      echo ""
+      echo "  BB_VER=X.Y.Z $0   # version via environment"
+      exit 0
+      ;;
+    *)
+      # Treat as version if it looks like a version number
+      if echo "$arg" | grep -qE '^[0-9]+\.[0-9]+'; then
+        BB_VER="$arg"
+      else
+        echo "Unknown argument: $arg (use --help)" >&2
+        exit 1
+      fi
+      ;;
+  esac
+done
+
+BB_VER="${BB_VER:-1.37.0}"
 
 ARCHIVE="busybox-${BB_VER}.tar.bz2"
 SRC_DIR="busybox-${BB_VER}"
@@ -55,6 +76,12 @@ JOBS=$(nproc)
 PATCH_MARKER="${SRC_DIR}/.patches_applied"
 
 echo "📦 BusyBox version: ${BB_VER}"
+
+# Clean build tree if requested
+if [ "$DO_CLEAN" = true ] && [ -d "${SRC_DIR}" ]; then
+  echo "🧹 Removing build tree: ${SRC_DIR}"
+  rm -rf "${SRC_DIR}"
+fi
 
 # Toolchain
 TOOLCHAIN_DIR="${PROJECT_ROOT}/x-tools/mips-lexra-linux-musl"
@@ -77,57 +104,25 @@ if [ ! -d "${SRC_DIR}" ]; then
   NEED_PATCH=1
 fi
 
-# Apply patches if needed (musl compatibility + JFFS2 fixes)
+# Apply patches if needed (Alpine edge set + CVE supplements + Lexra adaptations)
 if [ ! -f "${PATCH_MARKER}" ] || [ "${NEED_PATCH}" -eq 1 ]; then
-  echo "🔧 Applying patches..."
-  
-  # Patch 1: include/libbb.h - Disable off_t size check
-  echo "  → Patch 1/3: include/libbb.h (off_t size check)"
-  if grep -q "struct BUG_off_t_size_is_misdetected" "${SRC_DIR}/include/libbb.h"; then
-    sed -i '/struct BUG_off_t_size_is_misdetected {/,/};/c\
-/* Disabled for OpenWrt musl MIPS toolchain compatibility */\
-/*\
-struct BUG_off_t_size_is_misdetected {\
-\tchar BUG_off_t_size_is_misdetected[sizeof(off_t) == sizeof(uoff_t) ? 1 : -1];\
-};\
-*/' "${SRC_DIR}/include/libbb.h"
-    echo "     ✅ off_t check commented out"
-  else
-    echo "     ⚠️  Structure BUG_off_t_size_is_misdetected not found"
+  PATCH_DIR="${SCRIPT_DIR}/patches"
+  if [ -d "$PATCH_DIR" ]; then
+    echo "🔧 Applying patches from $(basename "$PATCH_DIR")/..."
+    for p in "$PATCH_DIR"/*.patch; do
+      [ -f "$p" ] || continue
+      name=$(basename "$p")
+      if patch -d "${SRC_DIR}" -p1 -N < "$p" > /tmp/bb-patch-$$.log 2>&1; then
+        echo "  ✅ $name"
+      else
+        echo "  ❌ $name"
+        tail -10 /tmp/bb-patch-$$.log
+        rm -f /tmp/bb-patch-$$.log
+        exit 1
+      fi
+    done
+    rm -f /tmp/bb-patch-$$.log
   fi
-  
-  # Patch 2: scripts/generate_BUFSIZ.sh - Add PAGE_SIZE fallback
-  echo "  → Patch 2/3: scripts/generate_BUFSIZ.sh (PAGE_SIZE fallback)"
-  if grep -q 'test x"\$PAGE_SIZE" = x"" && exit 1' "${SRC_DIR}/scripts/generate_BUFSIZ.sh"; then
-    # Line 99: Replace exit 1 with PAGE_SIZE="1000"
-    sed -i 's/test x"\$PAGE_SIZE" = x"" && exit 1/test x"$PAGE_SIZE" = x"" \&\& PAGE_SIZE="1000"/' \
-      "${SRC_DIR}/scripts/generate_BUFSIZ.sh"
-    echo "     ✅ PAGE_SIZE fallback added (line 99)"
-  else
-    echo "     ⚠️  Line 99 already patched or not found"
-  fi
-  
-  if grep -q 'test \$PAGE_SIZE -lt 1024 && exit 1' "${SRC_DIR}/scripts/generate_BUFSIZ.sh"; then
-    # Line 102: Replace exit 1 with PAGE_SIZE=4096
-    sed -i 's/test \$PAGE_SIZE -lt 1024 && exit 1/test $PAGE_SIZE -lt 1024 \&\& PAGE_SIZE=4096/' \
-      "${SRC_DIR}/scripts/generate_BUFSIZ.sh"
-    echo "     ✅ PAGE_SIZE=4096 fallback added (line 102)"
-  else
-    echo "     ⚠️  Line 102 already patched or not found"
-  fi
-
-  # Patch 3: libbb/update_passwd.c - Disable fcntl lock warning (JFFS2 doesn't support file locking)
-  echo "  → Patch 3/3: libbb/update_passwd.c (JFFS2 fcntl lock warning)"
-  if grep -q 'bb_perror_msg("warning: can'"'"'t lock' "${SRC_DIR}/libbb/update_passwd.c"; then
-    sed -i '/if (fcntl(old_fd, F_SETLK, \&lock) < 0)/,/bb_perror_msg.*can.*t lock/c\
-\tfcntl(old_fd, F_SETLK, \&lock); /* Ignore lock errors - JFFS2 does not support locking */' \
-      "${SRC_DIR}/libbb/update_passwd.c"
-    echo "     ✅ fcntl lock warning removed for JFFS2"
-  else
-    echo "     ⚠️  fcntl lock line already patched or not found"
-  fi
-
-  # Mark patches as applied
   touch "${PATCH_MARKER}"
   echo "✅ All patches applied successfully"
 else

@@ -1,20 +1,30 @@
 #!/bin/bash
 # flash_efr32.sh — Flash firmware to the Silabs EFR32 Zigbee/Thread radio
 #
-# 1. Presents a menu to select the firmware type (NCP, RCP, OT-RCP, Router)
-# 2. Ensures universal-silabs-flasher is available (installs in venv if needed)
-# 3. SSHes into the gateway to stop any radio daemon (otbr-agent, cpcd,
-#    zigbeed, serialgateway) and restart serialgateway in flash mode (-f)
-# 4. Flashes the selected firmware
-# 5. Reboots the gateway (serialgateway restarts normally via init script)
+# Flow (v3.0+, requires kernel 6.18 with rtl8196e-uart-bridge):
+#   1. Presents a menu to select the firmware type (NCP, RCP, OT-RCP, Router)
+#   2. Ensures universal-silabs-flasher is available (installs in venv if needed)
+#   3. SSHes into the gateway to stop radio daemons (otbr-agent, cpcd, zigbeed)
+#      and switch the in-kernel UART bridge to flash mode (flow_control=0).
+#      The bridge stays armed on TCP:8888 throughout — no process juggling.
+#   4. Flashes the selected firmware over socket://GW:8888
+#   5. Restores flow_control=1 and reboots the gateway
 #
-# Note: The Gecko Bootloader (stage 2) is rarely reflashed — only use [1] if
-# you need to update the bootloader itself (e.g., after an SDK upgrade).
+# Kernel bridge sysfs (5 writable params, all under /sys/module/
+# rtl8196e_uart_bridge/parameters/):
+#   baud         — UART baud rate
+#   flow_control — 1 = CRTSCTS on (normal); 0 = off (Gecko Bootloader Xmodem)
+#   enable       — 1 = armed, 0 = disarmed
+#   (tty, port, bind_addr are set at boot and not touched here)
 #
-# Baud rate: All pre-built firmware runs at 115200 (matching the Gecko
-# Bootloader). If you recompile at a different baud rate (e.g., 230400),
-# this script will automatically detect it, force the EFR32 into the Gecko
-# Bootloader, and flash over it — no J-Link/SWD needed.
+# Baud rate: Pre-built firmware runs at 115200 (NCP, RCP, Router) or 460800
+# (OT-RCP). Power users may run up to 892857. This script infers the current
+# baud from radio.conf and the bridge's sysfs state, then tries that baud
+# first. If detection fails, it scans known bauds via sysfs (instant — no
+# process restart needed).
+#
+# Dependencies:
+#   universal-silabs-flasher 1.0.3 (pinned — patch depends on this version)
 #
 # Usage: ./flash_efr32.sh [GATEWAY_IP]
 #   GATEWAY_IP - Gateway IP address (default: 192.168.1.88)
@@ -29,7 +39,7 @@
 #   FW_CHOICE=2 CONFIRM=y ./flash_efr32.sh    # Flash NCP non-interactively
 #   FW_CHOICE=4 CONFIRM=y ./flash_efr32.sh    # Flash OT-RCP non-interactively
 #
-# J. Nilo - February 2026
+# J. Nilo - February 2026, kernel-bridge rewrite April 2026
 
 set -euo pipefail
 
@@ -53,6 +63,23 @@ VENV_DIR="${SCRIPT_DIR}/silabs-flasher"
 SSH_OPTS="-n -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new"
 SSH="ssh $SSH_OPTS root@${GW_IP}"
 SSH_RETRIES=3
+
+BRIDGE_SYSFS="/sys/module/rtl8196e_uart_bridge/parameters"
+
+# Wait for the bridge TCP port to accept connections.
+# With the kernel bridge this should be immediate (never drops during flow
+# control or baud changes), but we keep the wait as a safety net.
+wait_for_port() {
+    local host="$1" port="$2" timeout="${3:-5}"
+    local deadline=$((SECONDS + timeout))
+    while [ $SECONDS -lt $deadline ]; do
+        if timeout 1 bash -c "echo >/dev/tcp/$host/$port" 2>/dev/null; then
+            return 0
+        fi
+        sleep 0.5
+    done
+    return 1
+}
 
 FW_DIR="${SCRIPT_DIR}/2-Zigbee-Radio-Silabs-EFR32"
 
@@ -126,7 +153,7 @@ elif command -v universal-silabs-flasher >/dev/null 2>&1; then
 else
     echo "universal-silabs-flasher not found — installing in ${VENV_DIR}..."
     python3 -m venv "$VENV_DIR"
-    "${VENV_DIR}/bin/pip" install --quiet universal-silabs-flasher
+    "${VENV_DIR}/bin/pip" install --quiet universal-silabs-flasher==1.0.3
     FLASHER="${VENV_DIR}/bin/universal-silabs-flasher"
     # Patch USF to probe Spinel/EZSP at 115200/230400 (upstream only probes
     # Spinel at 460800 and EZSP at 115200/460800 — misses our common bauds)
@@ -142,24 +169,34 @@ else
 fi
 echo ""
 
-# --- 2. SSH: restart serialgateway in flash mode (-f) ----------------------
-# serialgateway -f disables hardware RTS/CTS.  The Gecko Bootloader uses
-# XON/XOFF (software flow control) for Xmodem transfers.
+# --- 2. SSH: verify bridge, detect baud, switch to flash mode --------------
+# The in-kernel UART bridge exposes sysfs knobs; we change baud and
+# flow_control without disarming the bridge.  TCP:8888 stays up across
+# all operations below.
 
-echo "Connecting to ${GW_IP} — preparing serial port for flashing..."
+echo "Connecting to ${GW_IP} — detecting configuration..."
 for i in $(seq 1 "$SSH_RETRIES"); do
-    if $SSH "
-        # Stop any daemon holding the serial port
-        killall otbr-agent 2>/dev/null || true
-        killall cpcd 2>/dev/null || true
-        killall zigbeed 2>/dev/null || true
-        killall serialgateway 2>/dev/null || true
-        # Stop LED PWM timer (interferes with UART during Xmodem transfer)
-        echo 0 > /sys/class/leds/status/brightness 2>/dev/null || true
-        sleep 1
-        # Start serialgateway in flash mode (no HW flow control)
-        serialgateway -f
-    "; then
+    if DETECT_OUT=$($SSH "
+        # Require the in-kernel UART bridge — this script does not support
+        # the legacy userspace serialgateway (removed in v3.0).
+        if [ ! -d '$BRIDGE_SYSFS' ]; then
+            echo 'error no-bridge'
+            exit 0
+        fi
+        if [ \"\$(cat '$BRIDGE_SYSFS/armed' 2>/dev/null)\" != '1' ]; then
+            echo 'error not-armed'
+            exit 0
+        fi
+
+        # Infer mode from radio.conf (persistent), then read baud from the
+        # bridge itself — authoritative for what the EFR32 currently sees.
+        BAUD=\$(cat '$BRIDGE_SYSFS/baud' 2>/dev/null || echo 115200)
+        if grep -q '^MODE=otbr' /userdata/etc/radio.conf 2>/dev/null; then
+            echo \"otbr \${BAUD}\"
+        else
+            echo \"zigbee \${BAUD}\"
+        fi
+    " 2>/dev/null); then
         break
     fi
     if [ "$i" -eq "$SSH_RETRIES" ]; then
@@ -168,7 +205,62 @@ for i in $(seq 1 "$SSH_RETRIES"); do
     fi
     echo "SSH timeout — retrying ($((i+1))/$SSH_RETRIES)..."
 done
-echo "serialgateway -f running on port ${GW_PORT}."
+
+case "$DETECT_OUT" in
+    "error no-bridge")
+        echo "Error: in-kernel UART bridge not found on ${GW_IP}." >&2
+        echo "This script requires kernel 6.18 with CONFIG_RTL8196E_UART_BRIDGE=y." >&2
+        exit 1
+        ;;
+    "error not-armed")
+        echo "Error: UART bridge is not armed on ${GW_IP}." >&2
+        echo "Check S50uart_bridge init script; or arm manually:" >&2
+        echo "  echo 1 > ${BRIDGE_SYSFS}/enable" >&2
+        exit 1
+        ;;
+esac
+
+RADIO_MODE="${DETECT_OUT%% *}"
+CURRENT_BAUD="${DETECT_OUT##* }"
+CURRENT_BAUD="${CURRENT_BAUD:-115200}"
+RADIO_MODE="${RADIO_MODE:-zigbee}"
+echo "Detected: ${RADIO_MODE} @ ${CURRENT_BAUD} baud (bridge armed)"
+
+# Remember the original baud so we can restore it at cleanup (in case the
+# flash fails halfway — the bridge would otherwise be left at 115200 and
+# any zigbeed/otbr-agent trying to restart would talk at the wrong speed).
+ORIG_BAUD="$CURRENT_BAUD"
+
+# Switch bridge to flash mode: stop daemons, disable RTS/CTS.
+# The bridge stays armed — TCP:8888 never drops.
+echo "Switching bridge to flash mode (flow_control=0)..."
+$SSH "
+    killall otbr-agent 2>/dev/null || true
+    killall cpcd 2>/dev/null || true
+    killall zigbeed 2>/dev/null || true
+    # Stop LED PWM timer (interferes with UART during Xmodem transfer)
+    echo 0 > /sys/class/leds/status/brightness 2>/dev/null || true
+    # Disable hardware flow control — Gecko Bootloader uses XON/XOFF.
+    echo 0 > ${BRIDGE_SYSFS}/flow_control
+    sleep 1
+"
+
+# Restore bridge to normal mode + reboot on every exit path.
+cleanup() {
+    # Restore the original baud + flow_control, then reboot.
+    $SSH "
+        echo ${ORIG_BAUD} > ${BRIDGE_SYSFS}/baud 2>/dev/null || true
+        echo 1 > ${BRIDGE_SYSFS}/flow_control 2>/dev/null || true
+        reboot
+    " 2>/dev/null || true
+}
+trap cleanup EXIT
+
+if ! wait_for_port "$GW_IP" "$GW_PORT"; then
+    echo "Error: bridge not reachable on ${GW_IP}:${GW_PORT}." >&2
+    exit 1
+fi
+echo "Bridge ready at ${CURRENT_BAUD} baud, flow_control=0."
 echo ""
 
 # --- 3. Flash ---------------------------------------------------------------
@@ -177,7 +269,6 @@ if [ "${CONFIRM:-}" != "y" ]; then
     read -r -p "Flash $(basename "$FIRMWARE") to ${GW_IP}? [y/N] " confirm
     if [[ ! "$confirm" =~ ^[yY]$ ]]; then
         echo "Aborted."
-        $SSH "reboot" 2>/dev/null || true
         exit 0
     fi
 fi
@@ -185,12 +276,18 @@ fi
 echo ""
 echo "Flashing..."
 
+# Helper: change bridge baud (no process restart needed).
+set_bridge_baud() {
+    local baud="$1"
+    $SSH "echo ${baud} > ${BRIDGE_SYSFS}/baud"
+}
+
 if [ "$FIRMWARE" = "$FW_BTL" ]; then
     # Bootloader flash: capture output to detect NoFirmwareError.
     # USF tries run_firmware() after upload, which fails because the
     # application slot is empty — the flash itself succeeded.
     FLASH_LOG=$(mktemp)
-    trap 'rm -f "$FLASH_LOG"' EXIT
+    trap 'rm -f "$FLASH_LOG"; cleanup' EXIT
     "$FLASHER" --device "socket://${GW_IP}:${GW_PORT}" flash --firmware "$FIRMWARE" 2>&1 | tee "$FLASH_LOG" && FLASH_RC=0 || FLASH_RC=$?
 
     if [ $FLASH_RC -ne 0 ] && grep -q "NoFirmwareError" "$FLASH_LOG"; then
@@ -210,7 +307,7 @@ if [ "$FIRMWARE" = "$FW_BTL" ]; then
             3) FIRMWARE="$FW_RCP" ;;
             4) FIRMWARE="$FW_OT_RCP" ;;
             5) FIRMWARE="$FW_ROUTER" ;;
-            *) echo "Invalid choice."; $SSH "reboot" 2>/dev/null || true; exit 1 ;;
+            *) echo "Invalid choice."; exit 1 ;;
         esac
         echo ""
         echo "Flashing $(basename "$FIRMWARE")..."
@@ -219,42 +316,93 @@ if [ "$FIRMWARE" = "$FW_BTL" ]; then
         echo ""
         echo "Flash failed."
         echo ""
-        echo "Check that serialgateway is running in flash mode and the gateway is"
-        echo "reachable on ${GW_IP}:${GW_PORT}."
-        $SSH "reboot" 2>/dev/null || true
+        echo "Check that the bridge is armed in flash mode (flow_control=0)"
+        echo "and the gateway is reachable on ${GW_IP}:${GW_PORT}."
         exit 1
     fi
 else
-    # Normal firmware flash: try with serialgateway at 115200 (default).
-    if ! "$FLASHER" --device "socket://${GW_IP}:${GW_PORT}" flash --firmware "$FIRMWARE"; then
-        # Standard flash failed. The EFR32 firmware may be running at a
-        # non-standard baud rate (e.g., after a custom build at 230400).
-        # Over TCP, USF's baud rate parameter is ignored — serialgateway
-        # controls the UART speed. We restart serialgateway at each
-        # candidate baud and let USF flash again: it will detect the
-        # firmware, send enter_bootloader, then fail (Gecko Bootloader
-        # starts at 115200 but serialgateway is still at the app baud).
-        # We then restart serialgateway at 115200 and flash via bootloader.
+    # Normal firmware flash: targeted probe at detected baud.
+    # --probe-methods avoids USF's full default scan (~30s) and targets
+    # the expected protocol based on radio.conf (~1-3s).
+    if [ "$CURRENT_BAUD" = "460800" ] && [ "$RADIO_MODE" = "otbr" ]; then
+        # OT-RCP → Spinel only
+        PROBE="spinel:460800"
+    else
+        # NCP (EZSP) or RCP (CPC) — try both + bootloader
+        PROBE="ezsp:${CURRENT_BAUD},cpc:${CURRENT_BAUD},bootloader:${CURRENT_BAUD}"
+    fi
+    FLASH_LOG=$(mktemp)
+    if "$FLASHER" --device "socket://${GW_IP}:${GW_PORT}" \
+            --probe-methods "$PROBE" \
+            flash --firmware "$FIRMWARE" 2>&1 | tee "$FLASH_LOG"; then
+        rm -f "$FLASH_LOG"
+    elif grep -q "FailedToEnterBootloaderError" "$FLASH_LOG"; then
+        # USF detected the firmware and sent enter_bootloader, but the EFR32
+        # is now in Gecko Bootloader mode at 115200 while the bridge is
+        # still at the application baud. Change bridge baud to 115200.
+        rm -f "$FLASH_LOG"
         echo ""
-        echo "Standard flash failed. Scanning for firmware at other baud rates..."
+        echo "Firmware detected — EFR32 entered bootloader. Switching bridge to 115200..."
+        set_bridge_baud 115200
+        if ! "$FLASHER" --device "socket://${GW_IP}:${GW_PORT}" \
+                --probe-methods "bootloader:115200" \
+                flash --firmware "$FIRMWARE"; then
+            echo "Flash via bootloader failed."
+            exit 1
+        fi
+    else
+        rm -f "$FLASH_LOG"
+        # Targeted probe failed. The firmware may be running at a different
+        # baud than inferred. Scan all known bauds by changing the bridge's
+        # baud param (instant, no process restart).
+        echo ""
+        echo "Targeted probe at ${CURRENT_BAUD} failed. Scanning other baud rates..."
 
         RECOVERED=false
-        for BAUD in 230400; do
+        for BAUD in 115200 460800 892857 691200 230400; do
+            # Skip the baud we already tried
+            [ "$BAUD" = "$CURRENT_BAUD" ] && continue
+
             echo "  Trying ${BAUD} baud..."
-            $SSH "killall serialgateway 2>/dev/null || true; serialgateway -b ${BAUD} -f"
-            sleep 1
+            set_bridge_baud "$BAUD"
 
-            # USF detects firmware, sends enter_bootloader, then fails
-            # on the bootloader probe (baud mismatch).
-            FLASH_OUT=$("$FLASHER" --device "socket://${GW_IP}:${GW_PORT}" \
-                flash --firmware "$FIRMWARE" 2>&1) || true
+            # Probe with retry: USF can crash with AssertionError on the
+            # first attempt if the TCP connection is torn down mid-probe.
+            # One retry is enough.
+            PROBE="ezsp:${BAUD},spinel:${BAUD},cpc:${BAUD}"
+            FLASH_OUT=""
+            FLASH_RC=0
+            for attempt in 1 2; do
+                FLASH_RC=0
+                FLASH_OUT=$("$FLASHER" --device "socket://${GW_IP}:${GW_PORT}" \
+                    --probe-methods "$PROBE" \
+                    flash --firmware "$FIRMWARE" 2>&1) || FLASH_RC=$?
+                # If USF crashed (AssertionError / transport error), retry once
+                if echo "$FLASH_OUT" | grep -q "AssertionError\|_transport"; then
+                    [ "$attempt" -eq 1 ] && echo "    USF transport error — retrying..." && sleep 1 && continue
+                fi
+                break
+            done
 
+            # First USF call already flashed successfully (probe → enter_bootloader
+            # → Xmodem → verify, all in one USF invocation). Don't invoke a second
+            # redundant USF: the EFR32 has rebooted to the new app by now, so a
+            # bootloader-only probe would race against the Gecko Bootloader timeout
+            # and report "Flash failed" on a firmware that is actually fine.
+            if [ "$FLASH_RC" -eq 0 ]; then
+                echo "$FLASH_OUT" | grep "Detected" || true
+                RECOVERED=true
+                break
+            fi
+
+            # Detection worked but flashing failed — typically FailedToEnterBootloader
+            # (EFR32 is now sitting in the Gecko Bootloader at 115200). Switch the
+            # bridge and retry with the bootloader-only probe.
             if echo "$FLASH_OUT" | grep -q "Detected"; then
                 echo "$FLASH_OUT" | grep "Detected"
                 echo ""
-                echo "Restarting serialgateway at 115200 for Gecko Bootloader..."
-                $SSH "killall serialgateway 2>/dev/null || true; serialgateway -f"
-                sleep 1
+                echo "Switching bridge to 115200 for Gecko Bootloader..."
+                set_bridge_baud 115200
 
                 echo "Flashing via Gecko Bootloader..."
                 if "$FLASHER" --device "socket://${GW_IP}:${GW_PORT}" \
@@ -270,19 +418,58 @@ else
             echo ""
             echo "Flash failed."
             echo ""
-            echo "Could not detect firmware at any known baud rate (115200, 230400)."
+            echo "Could not detect firmware at any known baud rate"
+            echo "(tried: ${CURRENT_BAUD}, 115200, 460800, 892857, 691200, 230400)."
             echo "You may need a J-Link/SWD debugger to recover."
-            $SSH "reboot" 2>/dev/null || true
             exit 1
         fi
     fi
 fi
 
-# --- 4. Reboot -------------------------------------------------------------
+# --- 4. Configure radio mode + cleanup -------------------------------------
+
+# Ensure radio.conf matches the flashed firmware so the correct daemon
+# starts on reboot (otbr-agent for OT-RCP, bridge + nothing else otherwise).
+#
+# radio.conf is a multi-key file:
+#   MODE=otbr           (optional) — drives the OTBR vs bridge path
+#   BRIDGE_BAUD=<baud>  (optional) — read by S50uart_bridge at boot
+# We therefore operate on the MODE= line only and never wipe the whole
+# file: deleting it would lose BRIDGE_BAUD (or any future operator key)
+# and silently revert the bridge to its compile-time default post-reboot.
+case "$fw_choice" in
+    4)  # OT-RCP → OTBR mode, UART default 460800
+        MODE_LINE=MODE=otbr
+        DAEMON_MSG="otbr-agent (S70otbr) at 460800 baud"
+        ORIG_BAUD=460800
+        ;;
+    3)  # RCP-UART-HW → Zigbee via cpcd, UART default 460800
+        MODE_LINE=
+        DAEMON_MSG="in-kernel UART bridge on TCP:8888 at 460800 baud"
+        ORIG_BAUD=460800
+        ;;
+    *)  # NCP, Router → Zigbee mode, UART default 115200
+        MODE_LINE=
+        DAEMON_MSG="in-kernel UART bridge on TCP:8888 at 115200 baud"
+        ORIG_BAUD=115200
+        ;;
+esac
+
+# Persist both MODE= and BRIDGE_BAUD= to /userdata/etc/radio.conf so
+# S50uart_bridge arms the bridge at the right baud on next boot (and
+# S70otbr knows whether to run). Fails quietly if SSH drops — the
+# cleanup trap still sets the runtime baud, but the next reboot would
+# reapply the stale persisted baud without this step.
+$SSH "
+    mkdir -p /userdata/etc
+    touch /userdata/etc/radio.conf
+    sed -i '/^MODE=/d;/^BRIDGE_BAUD=/d' /userdata/etc/radio.conf
+    { [ -n '${MODE_LINE}' ] && echo '${MODE_LINE}'; echo 'BRIDGE_BAUD=${ORIG_BAUD}'; } >> /userdata/etc/radio.conf
+" 2>/dev/null || true
 
 echo ""
 echo "Flash complete. Rebooting gateway..."
-$SSH "reboot" 2>/dev/null || true
+# cleanup() in the trap will restore baud + flow_control and reboot.
 
 echo ""
-echo "Done. Gateway rebooting — serialgateway will restart in normal mode (S60serialgateway)."
+echo "Done. Gateway rebooting — ${DAEMON_MSG} will start automatically."

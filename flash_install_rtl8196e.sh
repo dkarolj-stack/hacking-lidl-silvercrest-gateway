@@ -93,12 +93,35 @@ while [ $# -gt 0 ]; do
 done
 
 # --- prerequisites -----------------------------------------------------------
+# Fail fast with a single actionable message before building or touching the
+# gateway. Users who didn't go through 1-Build-Environment/install_deps.sh
+# would otherwise hit silent failures deep in the build (issue #84).
 
-# Check tftp-hpa client
-tftp_usage="$(tftp --help 2>&1 || true)"
-if ! command -v tftp >/dev/null 2>&1 || ! echo "$tftp_usage" | grep -q '\-c'; then
-    echo "Error: tftp-hpa client not found (need the -c flag)." >&2
-    echo "Install it with: sudo apt install tftp-hpa" >&2
+missing_pkgs=()
+check_cmd() {
+    # $1 = command to probe, $2 = apt package to install if missing
+    command -v "$1" >/dev/null 2>&1 || missing_pkgs+=("$2")
+}
+
+check_cmd fakeroot     fakeroot
+check_cmd gcc          gcc
+check_cmd mkfs.jffs2   mtd-utils
+check_cmd mksquashfs   squashfs-tools
+
+# tftp-hpa: the BSD tftp client is also called "tftp" but lacks the -c flag.
+# Capture --help output first — tftp-hpa exits 64 on --help, which under
+# `set -o pipefail` would make the piped grep inherit that non-zero code
+# even on a successful match.
+tftp_help="$(tftp --help 2>&1 || true)"
+if ! command -v tftp >/dev/null 2>&1 \
+   || ! echo "$tftp_help" | grep -q -- '-c'; then
+    missing_pkgs+=("tftp-hpa")
+fi
+
+if [ "${#missing_pkgs[@]}" -gt 0 ]; then
+    echo "Error: missing build/flash prerequisites: ${missing_pkgs[*]}" >&2
+    echo "Install them with:" >&2
+    echo "  sudo apt install ${missing_pkgs[*]}" >&2
     exit 1
 fi
 
@@ -540,7 +563,7 @@ if [ "${CONFIRM:-}" != "y" ] && [ -t 0 ]; then
     if [ "$RADIO" = "thread" ]; then
         echo "  ot-rcp.gbl             — OpenThread RCP (required for OTBR)"
     else
-        echo "  ncp-uart-hw-7.5.1.gbl  — Zigbee NCP for serialgateway + Z2M"
+        echo "  ncp-uart-hw-7.5.1.gbl  — Zigbee NCP for in-kernel UART bridge + Z2M"
         echo "  rcp-uart-802154.gbl    — Zigbee RCP for cpcd + zigbeed (Docker)"
         echo "  z3-router-7.5.1.gbl    — Zigbee 3.0 Router (standalone, no coordinator)"
     fi

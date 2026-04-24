@@ -2,7 +2,7 @@
 
 Systemd --user manager for the complete RCP chain:
 ```
-RCP (EFR32) ←serialgateway→ socat ←PTY→ cpcd ←CPC→ zigbeed ←PTY→ socat ←PTY→ Z2M
+RCP (EFR32) ←kernel UART bridge (TCP:8888)→ socat ←PTY→ cpcd ←CPC→ zigbeed ←PTY→ socat ←PTY→ Z2M
 ```
 
 ## Architecture
@@ -36,7 +36,7 @@ RCP (EFR32) ←serialgateway→ socat ←PTY→ cpcd ←CPC→ zigbeed ←PTY→
 │                                                                          │
 └─────────────────────────────────────────────────────────────────────────┘
          ▲
-         │ TCP (serialgateway)
+         │ TCP (kernel UART bridge)
          ▼
 ┌─────────────────┐
 │ Lidl Gateway    │
@@ -49,7 +49,7 @@ RCP (EFR32) ←serialgateway→ socat ←PTY→ cpcd ←CPC→ zigbeed ←PTY→
 1. **cpcd** installed (`/usr/local/bin/cpcd`) - see `../cpcd/`
 2. **zigbeed** installed (`/usr/local/bin/zigbeed`) - see `../zigbeed-8.2.2/`
 3. **socat** installed (`apt install socat`)
-4. **serialgateway** on the gateway (exposes the RCP via TCP)
+4. **In-kernel UART bridge** on the gateway (kernel 6.18 — exposes the RCP via TCP:8888, armed by S50uart_bridge at boot)
 5. **Direct Ethernet cable** between host and gateway (strongly recommended)
 
 > **Network Quality:** The CPC protocol is sensitive to latency and packet loss.
@@ -77,7 +77,7 @@ nano ~/.config/rcp-stack/rcp-stack.env
 Edit `~/.config/rcp-stack/rcp-stack.env`:
 
 ```bash
-# TCP endpoint of the RCP (serialgateway on the gateway)
+# TCP endpoint of the RCP (in-kernel UART bridge on the gateway)
 RCP_ENDPOINT=tcp://192.168.1.100:8888
 
 # Commands for each service
@@ -189,7 +189,7 @@ In `zigbee2mqtt/data/configuration.yaml`:
 serial:
   port: /tmp/ttyZ2M
   adapter: ember
-  baudrate: 115200
+  baudrate: 460800
 ```
 
 ## Troubleshooting
@@ -197,7 +197,8 @@ serial:
 ### "Cannot connect to RCP endpoint"
 The gateway is not reachable. Check:
 - Gateway is powered on
-- serialgateway is running on the gateway
+- in-kernel UART bridge is armed on the gateway
+  (`cat /sys/module/rtl8196e_uart_bridge/parameters/armed` → `1`)
 - Network connectivity (ping the gateway IP)
 - Correct port number in `RCP_ENDPOINT`
 

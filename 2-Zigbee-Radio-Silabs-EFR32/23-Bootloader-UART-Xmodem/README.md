@@ -154,7 +154,7 @@ From the repository root:
 # Select [1] Bootloader
 ```
 
-The script handles serialgateway restart, flashing, and the expected `NoFirmwareError`
+The script handles switching the in-kernel UART bridge to flash mode, flashing, and the expected `NoFirmwareError`
 (the application slot is empty after a bootloader update). It then prompts you to
 select an application firmware (NCP, RCP, etc.) and flashes it immediately.
 

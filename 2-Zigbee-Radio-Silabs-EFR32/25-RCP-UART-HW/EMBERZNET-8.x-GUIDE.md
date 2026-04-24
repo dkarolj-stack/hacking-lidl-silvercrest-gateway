@@ -28,11 +28,11 @@ In RCP mode, the EFR32 chip only handles the 802.15.4 radio PHY/MAC layer. The E
 
 ```
 +-------------------+    UART    +-------------------+   Ethernet   +---------------------+
-|  EFR32MG1B (RCP)  |   115200   |  Lidl Gateway     |    TCP/IP    |  Host (x86/ARM)     |
+|  EFR32MG1B (RCP)  |   460800   |  Lidl Gateway     |    TCP/IP    |  Host (x86/ARM)     |
 |                   |   baud     |  (RTL8196E)       |              |                     |
 |  802.15.4 PHY/MAC |<---------->|                   |<------------>|  cpcd               |
-|  + CPC Protocol   |   ttyS0    |  serialgateway    |   port 8888  |    |                |
-|                   |            |  (serial->TCP)    |              |    v                |
+|  + CPC Protocol   |   ttyS0    |  in-kernel UART   |   port 8888  |    |                |
+|                   |            |  bridge (kernel)  |              |    v                |
 |  Gecko SDK 4.5.0  |            |                   |              |  zigbeed 8.2.2      |
 |                   |            |                   |              |  (EmberZNet 8.x)    |
 +-------------------+            +-------------------+              |    |                |
@@ -46,7 +46,7 @@ In RCP mode, the EFR32 chip only handles the 802.15.4 radio PHY/MAC layer. The E
 ### Prerequisites
 
 - **Host machine**: x86_64 PC, Raspberry Pi 4/5, or any Linux host
-- **Lidl gateway**: Already flashed with RCP firmware and running `serialgateway`
+- **Lidl gateway**: Already flashed with RCP firmware; kernel 6.18 with `rtl8196e-uart-bridge` armed (default via S50uart_bridge)
 - **Network**: Direct Ethernet cable between host and gateway (strongly recommended)
 
 ### Step 1: Install Build Dependencies
@@ -78,7 +78,7 @@ cd 2-Zigbee-Radio-Silabs-EFR32/25-RCP-UART-HW/zigbeed-8.2.2
 ./build_zigbeed.sh      # Downloads SDK automatically, build, install
 ```
 
-> **Note:** On first run, the script automatically downloads Simplicity SDK 2025.6.2 from GitHub (~1.5 GB).
+> **Note:** On first run, the script automatically downloads Simplicity SDK 2025.6.3 from GitHub (~1.5 GB).
 
 ### Step 5: Setup rcp-stack Manager
 
@@ -131,7 +131,7 @@ cp /path/to/hacking-lidl-silvercrest-gateway/2-Zigbee-Radio-Silabs-EFR32/25-RCP-
 
 **Important:** Edit `cpcd.conf` and set the correct baudrate (must match RCP firmware):
 ```yaml
-uart_device_baud: 115200
+uart_device_baud: 460800
 ```
 
 ### Step 7: Start the Stack
@@ -233,14 +233,14 @@ journalctl --user -u cpcd-bringup.service -f
 
 **Symptom:**
 ```
-FATAL: Baudrate mismatch (230400) on the daemon versus (115200) on the secondary
+FATAL: Baudrate mismatch (230400) on the daemon versus (460800) on the secondary
 ```
 
 **Cause:** The baudrate in `cpcd.conf` doesn't match the RCP firmware.
 
 **Solution:** Edit `~/.config/rcp-stack/cpcd.conf` and set the correct baudrate:
 ```yaml
-uart_device_baud: 115200
+uart_device_baud: 460800
 ```
 
 Then restart:
@@ -273,7 +273,8 @@ Cannot connect to RCP endpoint 192.168.1.88:8888
 
 **Checks:**
 1. Gateway is powered on
-2. `serialgateway` is running on the gateway
+2. In-kernel UART bridge is armed on the gateway
+   (`cat /sys/module/rtl8196e_uart_bridge/parameters/armed` → `1`)
 3. Network connectivity: `nc -zv 192.168.1.88 8888`
 4. Correct IP in `~/.config/rcp-stack/rcp-stack.env`
 
@@ -323,7 +324,10 @@ Zigbeed Version: GSDK 8.2.2 - ...
    rm ~/.local/state/rcp-stack/zigbeed/host_token.nvm
    ```
 
-3. **Baud rate**: 115200 baud is recommended. Higher rates may cause UART overruns on the RTL8196E.
+3. **Baud rate**: 460800 baud is the pre-built firmware default. All
+   bauds up to 460800 (POSIX-capped by cpcd) run through the in-kernel
+   UART bridge on kernel 6.18 (see
+   [baudrate guide](../README.md#baudrate-and-network-considerations)).
 
 ---
 

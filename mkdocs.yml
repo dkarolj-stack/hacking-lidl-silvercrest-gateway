@@ -169,7 +169,6 @@ exclude_docs: |
   3-Main-SoC-Realtek-RTL8196E/33-Rootfs/dropbear/
   3-Main-SoC-Realtek-RTL8196E/33-Rootfs/scripts/
   3-Main-SoC-Realtek-RTL8196E/34-Userdata/skeleton/
-  3-Main-SoC-Realtek-RTL8196E/34-Userdata/serialgateway/
   3-Main-SoC-Realtek-RTL8196E/34-Userdata/ot-br-posix/build/
   3-Main-SoC-Realtek-RTL8196E/34-Userdata/ot-br-posix/src/
   # Vendored ot-br-posix git clone (the doubled-path inner copy)

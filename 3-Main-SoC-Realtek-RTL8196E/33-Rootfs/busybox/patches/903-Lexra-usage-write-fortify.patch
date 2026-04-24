@@ -1,0 +1,17 @@
+From: Jacques Nilo <jacquesnilo@gmail.com>
+Subject: [PATCH] busybox 903-Lexra-usage-write-fortify
+
+Check write() return value (GCC 15 + FORTIFY_SOURCE=2 (Alpine default) rejects unchecked write())
+
+---
+--- a/applets/usage.c	2023-01-05 16:29:10.000000000 +0100
++++ b/applets/usage.c	2026-04-17 09:08:30.688525492 +0200
+@@ -49,7 +49,7 @@
+ 		num_messages, sizeof(usage_array[0]),
+ 		compare_func);
+ 	for (i = 0; i < num_messages; i++)
+-		write(STDOUT_FILENO, usage_array[i].usage, strlen(usage_array[i].usage) + 1);
++		if (write(STDOUT_FILENO, usage_array[i].usage, strlen(usage_array[i].usage) + 1) < 0) continue;
+ 
+ 	return 0;
+ }

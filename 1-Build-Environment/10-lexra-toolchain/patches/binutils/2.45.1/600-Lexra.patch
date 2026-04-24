@@ -1,0 +1,271 @@
+diff -urN binutils-2.45.1/bfd/archures.c binutils-2.45.1-lexra/bfd/archures.c
+--- a/bfd/archures.c	2025-11-10 01:00:00.000000000 +0100
++++ b/bfd/archures.c	2026-04-16 22:50:35.368842018 +0200
+@@ -186,6 +186,9 @@
+ .#define bfd_mach_mips_octeon3		6503
+ .#define bfd_mach_mips_xlr		887682	 {* decimal 'XLR'.  *}
+ .#define bfd_mach_mips_interaptiv_mr2	736550	 {* decimal 'IA2'.  *}
++.#define bfd_mach_mips_lx4380        4380
++.#define bfd_mach_mips_lx5280        5280
++.#define bfd_mach_mips_lx5380        5380
+ .#define bfd_mach_mipsisa32		32
+ .#define bfd_mach_mipsisa32r2		33
+ .#define bfd_mach_mipsisa32r3		34
+diff -urN binutils-2.45.1/bfd/bfd-in2.h binutils-2.45.1-lexra/bfd/bfd-in2.h
+--- a/bfd/bfd-in2.h	2025-11-10 01:00:00.000000000 +0100
++++ b/bfd/bfd-in2.h	2026-04-16 22:50:35.367842047 +0200
+@@ -1407,6 +1407,9 @@
+ #define bfd_mach_mips_octeon3          6503
+ #define bfd_mach_mips_xlr              887682   /* decimal 'XLR'.  */
+ #define bfd_mach_mips_interaptiv_mr2   736550   /* decimal 'IA2'.  */
++#define bfd_mach_mips_lx4380        4380
++#define bfd_mach_mips_lx5280        5280
++#define bfd_mach_mips_lx5380        5380
+ #define bfd_mach_mipsisa32             32
+ #define bfd_mach_mipsisa32r2           33
+ #define bfd_mach_mipsisa32r3           34
+diff -urN binutils-2.45.1/bfd/cpu-mips.c binutils-2.45.1-lexra/bfd/cpu-mips.c
+--- a/bfd/cpu-mips.c	2025-11-10 01:00:00.000000000 +0100
++++ b/bfd/cpu-mips.c	2026-04-16 22:50:35.368842018 +0200
+@@ -109,7 +109,10 @@
+   I_xlr,
+   I_interaptiv_mr2,
+   I_allegrex,
+-  I_micromips
++  I_micromips,
++  I_lx4380,
++  I_lx5280,
++  I_lx5380
+ };
+ 
+ #define NN(index) (&arch_info_struct[(index) + 1])
+@@ -165,7 +168,10 @@
+   N (32, 32, bfd_mach_mips_interaptiv_mr2, "mips:interaptiv-mr2", false,
+      NN(I_interaptiv_mr2)),
+   N (32, 32, bfd_mach_mips_allegrex, "mips:allegrex", false, NN(I_allegrex)),
+-  N (64, 64, bfd_mach_mips_micromips, "mips:micromips", false, NULL)
++  N (64, 64, bfd_mach_mips_micromips, "mips:micromips", false, NN(I_micromips)),
++  N (32, 32, bfd_mach_mips_lx4380, "mips:lx4380", false, NN(I_lx4380)),
++  N (32, 32, bfd_mach_mips_lx5280, "mips:lx5280", false, NN(I_lx5280)),
++  N (32, 32, bfd_mach_mips_lx5380, "mips:lx5380", false, NULL)
+ };
+ 
+ /* The default architecture is mips:3000, but with a machine number of
+diff -urN binutils-2.45.1/gas/config/tc-mips.c binutils-2.45.1-lexra/gas/config/tc-mips.c
+--- a/gas/config/tc-mips.c	2025-11-10 01:00:00.000000000 +0100
++++ b/gas/config/tc-mips.c	2026-04-16 22:50:35.369841988 +0200
+@@ -20191,6 +20191,11 @@
+ 						ISA_MIPS64R6, CPU_MIPS64R6},
+   { "p6600",	      0, ASE_VIRT | ASE_MSA,	ISA_MIPS64R6, CPU_MIPS64R6},
+ 
++  /* Lexra processors */
++  { "lx4380",       0, 0,     ISA_MIPS1,    CPU_LX4380 },
++  { "lx5280",       0, 0,     ISA_MIPS1,    CPU_LX5280 },
++  { "lx5380",       0, 0,     ISA_MIPS1,    CPU_LX5380 },
++
+   /* End marker.  */
+   { NULL, 0, 0, 0, 0 }
+ };
+diff -urN binutils-2.45.1/include/opcode/mips.h binutils-2.45.1-lexra/include/opcode/mips.h
+--- a/include/opcode/mips.h	2025-11-10 01:00:00.000000000 +0100
++++ b/include/opcode/mips.h	2026-04-16 22:50:35.370841958 +0200
+@@ -975,7 +975,7 @@
+ #undef ISAF
+ 
+ /* Masks used for Chip specific instructions.  */
+-#define INSN_CHIP_MASK		0x01ffffe0
++#define INSN_CHIP_MASK		0x0fffffe0
+ 
+ /* MIPS R4650 instruction.  */
+ #define INSN_4650		0x00000020
+@@ -1015,6 +1015,11 @@
+ /* Sony PSP Allegrex instruction.  */
+ #define INSN_ALLEGREX		0x01000000
+ 
++/* Lexra instructions */
++#define INSN_LX4380		0x02000000
++#define INSN_LX5280		0x04000000
++#define INSN_LX5380		0x08000000
++
+ /* DSP ASE */
+ #define ASE_DSP			0x00000001
+ #define ASE_DSP64		0x00000002
+@@ -1139,6 +1144,9 @@
+ #define CPU_OCTEON3	6503
+ #define CPU_XLR     	887682   	/* decimal 'XLR'   */
+ #define CPU_INTERAPTIV_MR2 736550	/* decimal 'IA2'  */
++#define CPU_LX4380 4380
++#define CPU_LX5280 5280
++#define CPU_LX5380 5380
+ 
+ /* Return true if the given CPU is included in INSN_* mask MASK.  */
+ 
+@@ -1212,6 +1220,15 @@
+     case CPU_ALLEGREX:
+       return (mask & INSN_ALLEGREX) != 0;
+ 
++    case CPU_LX4380:
++      return (mask & INSN_LX4380) != 0;
++
++    case CPU_LX5280:
++      return (mask & INSN_LX5280) != 0;
++
++    case CPU_LX5380:
++      return (mask & INSN_LX5380) != 0;
++
+     default:
+       return false;
+     }
+diff -urN binutils-2.45.1/opcodes/mips-dis.c binutils-2.45.1-lexra/opcodes/mips-dis.c
+--- a/opcodes/mips-dis.c	2025-11-10 01:00:00.000000000 +0100
++++ b/opcodes/mips-dis.c	2026-04-16 22:50:35.376841778 +0200
+@@ -736,6 +736,19 @@
+     mips_cp0sel_names_xlr, ARRAY_SIZE (mips_cp0sel_names_xlr),
+     mips_cp1_names_mips3264, mips_hwr_names_numeric },
+ 
++  /* Lexra processors */
++  { "lx4380", 1, bfd_mach_mips_lx4380, CPU_LX4380, ISA_MIPS1 | INSN_LX4380, 0,
++    mips_cp0_names_numeric, NULL, 0, mips_cp1_names_numeric,
++    mips_hwr_names_numeric },
++
++  { "lx5280", 1, bfd_mach_mips_lx5280, CPU_LX5280, ISA_MIPS1 | INSN_LX5280, 0,
++    mips_cp0_names_numeric, NULL, 0, mips_cp1_names_numeric,
++    mips_hwr_names_numeric },
++
++  { "lx5380", 1, bfd_mach_mips_lx5380, CPU_LX5380, ISA_MIPS1 | INSN_LX5380, 0,
++    mips_cp0_names_numeric, NULL, 0, mips_cp1_names_numeric,
++    mips_hwr_names_numeric },
++
+   /* This entry, mips16, is here only for ISA/processor selection; do
+      not print its name.  */
+   { "",		1, bfd_mach_mips16, CPU_MIPS16, ISA_MIPS64,
+diff -urN binutils-2.45.1/opcodes/mips-opc.c binutils-2.45.1-lexra/opcodes/mips-opc.c
+--- a/opcodes/mips-opc.c	2025-11-10 01:00:00.000000000 +0100
++++ b/opcodes/mips-opc.c	2026-04-16 22:50:35.376841778 +0200
+@@ -319,6 +319,7 @@
+ #define EE      INSN_5900
+ #define M1	INSN_10000
+ #define ALX	INSN_ALLEGREX
++#define LX	(INSN_LX4380 | INSN_LX5280 | INSN_LX5380)
+ #define SB1     INSN_SB1
+ #define N411	INSN_4111
+ #define N412	INSN_4120
+@@ -975,8 +976,8 @@
+ {"flushid",		"",		0xbc030000, 0xffffffff, 0, 			0,		L1,		0,	0 },
+ {"wb",			"o(b)",		0xbc040000, 0xfc1f0000, RD_2|SM,		0,		L1,		0,	0 },
+ {"cache",		"k,+j(b)",	0x7c000025, 0xfc00007f, RD_3,			0,		I37,		0,	0 },
+-{"cache",		"k,o(b)",	0xbc000000, 0xfc000000, RD_3,           	0,		I3_32|T3|ALX,	0,	I37 },
+-{"cache",		"k,A(b)",	0,    (int) M_CACHE_AB, INSN_MACRO,		0,		I3_32|T3|ALX,	0,	0 },
++{"cache",		"k,o(b)",	0xbc000000, 0xfc000000, RD_3,           	0,		I3_32|T3|ALX|LX,	0,	I37 },
++{"cache",		"k,A(b)",	0,    (int) M_CACHE_AB, INSN_MACRO,		0,		I3_32|T3|ALX|LX,	0,	0 },
+ {"ceil.l.d",		"D,S",		0x4620000a, 0xffff003f, WR_1|RD_2|FP_D,		0,		I3_33,		0,	0 },
+ {"ceil.l.s",		"D,S",		0x4600000a, 0xffff003f, WR_1|RD_2|FP_S|FP_D,	0,		I3_33,		0,	0 },
+ {"ceil.w.d",		"D,S",		0x4620000e, 0xffff003f, WR_1|RD_2|FP_S|FP_D,	0,		I2,		0,	SF },
+@@ -1039,7 +1040,7 @@
+ /* dctr and dctw are used on the r5000.  */
+ {"dctr",		"o(b)",	 	0xbc050000, 0xfc1f0000, RD_2,			0,		I3,		0,	0 },
+ {"dctw",		"o(b)",		0xbc090000, 0xfc1f0000, RD_2,			0,		I3,		0,	0 },
+-{"deret",		"",		0x4200001f, 0xffffffff, NODS, 			0,		I32|G2,		0,	0 },
++{"deret",		"",		0x4200001f, 0xffffffff, NODS, 			0,		I32|G2|LX,	0,	0 },
+ {"dext",		"t,r,+A,+H",	0x7c000003, 0xfc00003f, WR_1|RD_2,    		0,		I65,		0,	0 },
+ {"dext",		"t,r,+A,+G",	0x7c000001, 0xfc00003f, WR_1|RD_2,    		0,		I65,		0,	0 }, /* dextm */
+ {"dext",		"t,r,+E,+H",	0x7c000002, 0xfc00003f, WR_1|RD_2,    		0,		I65,		0,	0 }, /* dextu */
+@@ -1302,8 +1303,8 @@
+ {"li.s",		"t,f",		0,    (int) M_LI_S,	INSN_MACRO,		INSN2_M_FP_S,	I1,		0,	0 },
+ {"li.s",		"T,l",		0,    (int) M_LI_SS,	INSN_MACRO,		INSN2_M_FP_S,	I1,		0,	0 },
+ {"ll",			"t,+j(b)",	0x7c000036, 0xfc00007f, WR_1|RD_3|LM,		0,		I37,		0,	0 },
+-{"ll",			"t,o(b)",	0xc0000000, 0xfc000000, WR_1|RD_3|LM,		0,		I2,		0,	EE|I37 },
+-{"ll",			"t,A(b)",	0,    (int) M_LL_AB,	INSN_MACRO,		0,		I2,		0,	EE },
++{"ll",			"t,o(b)",	0xc0000000, 0xfc000000, WR_1|RD_3|LM,		0,		I2|LX,		0,	EE|I37 },
++{"ll",			"t,A(b)",	0,    (int) M_LL_AB,	INSN_MACRO,		0,		I2|LX,		0,	EE },
+ {"lld",			"t,+j(b)",	0x7c000037, 0xfc00007f, WR_1|RD_3|LM,		0,		I69,		0,	0 },
+ {"lld",			"t,o(b)",	0xd0000000, 0xfc000000, WR_1|RD_3|LM,		0,		I3,		0,	EE|I69 },
+ {"lld",			"t,A(b)",	0,    (int) M_LLD_AB,	INSN_MACRO,		0,		I3,		0,	EE },
+@@ -1361,8 +1362,8 @@
+ {"maccu",		"d,s,t",	0x00000068, 0xfc0007ff,	WR_1|RD_2|RD_3|WR_HILO,	     0,		N412,		0,	0 },
+ {"maccu",		"d,s,t",	0x00000159, 0xfc0007ff, WR_1|RD_2|RD_3|WR_HILO,	     0,		N5,		0,	0 },
+ {"maccus",		"d,s,t",	0x00000468, 0xfc0007ff,	WR_1|RD_2|RD_3|WR_HILO,	     0,		N412,		0,	0 },
+-{"mad",			"s,t",		0x70000000, 0xfc00ffff, RD_1|RD_2|MOD_HILO,	     0,		P3,		0,	0 },
+-{"madu",		"s,t",		0x70000001, 0xfc00ffff, RD_1|RD_2|MOD_HILO,	     0,		P3,		0,	0 },
++{"mad",			"s,t",		0x70000000, 0xfc00ffff, RD_1|RD_2|MOD_HILO,	     0,		P3|LX,		0,	0 },
++{"madu",		"s,t",		0x70000001, 0xfc00ffff, RD_1|RD_2|MOD_HILO,	     0,		P3|LX,		0,	0 },
+ {"madd.d",		"D,R,S,T",	0x4c000021, 0xfc00003f, WR_1|RD_2|RD_3|RD_4|FP_D,    0,		I4_33,		0,	I37 },
+ {"madd.d",		"D,S,T",	0x46200018, 0xffe0003f,	WR_1|RD_2|RD_3|FP_D,	     0,		IL2E,		0,	0 },
+ {"madd.d",		"D,S,T",	0x72200018, 0xffe0003f,	WR_1|RD_2|RD_3|FP_D,	     0,		IL2F,		0,	0 },
+@@ -1465,7 +1466,7 @@
+ {"movf.l",		"X,Y,N",	0x46a00011, 0xffe3003f, WR_1|RD_2|RD_CC|FP_D,	0,		SB1,		MX,	0 },
+ {"movf.s",		"D,S,N",	0x46000011, 0xffe3003f, WR_1|RD_2|RD_CC|FP_S,   0,		I4_32,		0,	I37 },
+ {"movf.ps",		"D,S,N",	0x46c00011, 0xffe3003f, WR_1|RD_2|RD_CC|FP_D,	0,		I5_33,		0,	I37 },
+-{"movn",		"d,v,t",	0x0000000b, 0xfc0007ff, WR_1|RD_2|RD_3, 	0,		I4_32|IL2E|IL2F|EE|ALX, 0,	I37 },
++{"movn",		"d,v,t",	0x0000000b, 0xfc0007ff, WR_1|RD_2|RD_3, 	0,		I4_32|IL2E|IL2F|EE|ALX|LX, 0,	I37 },
+ {"movnz",		"d,v,t",	0x0000000b, 0xfc0007ff, WR_1|RD_2|RD_3, 	0,		IL2E|IL2F,	LEXT,	0 },
+ {"ffc",			"d,v",		0x0000000b, 0xfc1f07ff,	WR_1|RD_2,		0,		L1,		0,	0 },
+ {"movn.d",		"D,S,t",	0x46200013, 0xffe0003f, WR_1|RD_2|RD_3|FP_D,    0,		I4_32,		0,	I37 },
+@@ -1479,7 +1480,7 @@
+ {"movt.l",		"X,Y,N",	0x46a10011, 0xffe3003f, WR_1|RD_2|RD_CC|FP_D,   0,		SB1,		MX,	0 },
+ {"movt.s",		"D,S,N",	0x46010011, 0xffe3003f, WR_1|RD_2|RD_CC|FP_S,   0,		I4_32,		0,	I37 },
+ {"movt.ps",		"D,S,N",	0x46c10011, 0xffe3003f, WR_1|RD_2|RD_CC|FP_D,	0,		I5_33,		0,	I37 },
+-{"movz",		"d,v,t",	0x0000000a, 0xfc0007ff, WR_1|RD_2|RD_3, 	0,		I4_32|IL2E|IL2F|EE|ALX, 0,	I37 },
++{"movz",		"d,v,t",	0x0000000a, 0xfc0007ff, WR_1|RD_2|RD_3, 	0,		I4_32|IL2E|IL2F|EE|ALX|LX, 0,	I37 },
+ {"ffs",			"d,v",		0x0000000a, 0xfc1f07ff,	WR_1|RD_2,		0,		L1,		0,	0 },
+ {"movz.d",		"D,S,t",	0x46200012, 0xffe0003f, WR_1|RD_2|RD_3|FP_D,    0,		I4_32,		0,	I37 },
+ {"movz.l",		"D,S,t",	0x46a00012, 0xffe0003f, WR_1|RD_2|RD_3|FP_D,    0,		SB1,		MX,	0 },
+@@ -1509,12 +1510,12 @@
+ {"msub.ps",		"D,S,T",	0x72c00019, 0xffe0003f,	WR_1|RD_2|RD_3|FP_D,	0,		IL2F,		0,	0 },
+ {"msub",		"s,t",		0x0000002e, 0xfc00ffff, RD_1|RD_2|WR_HILO,	0,		ALX,		0,	0 },
+ {"msub",		"s,t",		0x0000001e, 0xfc00ffff, RD_1|RD_2|WR_HILO,	0,		L1,		0,	0 },
+-{"msub",		"s,t",		0x70000004, 0xfc00ffff, RD_1|RD_2|MOD_HILO,     0,		I32|N55,	0,	I37 },
++{"msub",		"s,t",		0x70000004, 0xfc00ffff, RD_1|RD_2|MOD_HILO,     0,		I32|N55|LX,	0,	I37 },
+ {"msub",		"7,s,t",	0x70000004, 0xfc00e7ff, RD_2|RD_3|MOD_a,        0,              0,		D32,	0 },
+ {"msuba.s",		"S,T",		0x4600001f, 0xffe007ff,	RD_1|RD_2|FP_S,		0,		EE,		0,	0 },
+ {"msubu",		"s,t",		0x0000002f, 0xfc00ffff, RD_1|RD_2|WR_HILO,	0,		ALX,		0,	0 },
+ {"msubu",		"s,t",		0x0000001f, 0xfc00ffff, RD_1|RD_2|WR_HILO,	0,		L1,		0,	0 },
+-{"msubu",		"s,t",		0x70000005, 0xfc00ffff, RD_1|RD_2|MOD_HILO,     0,		I32|N55,	0,	I37 },
++{"msubu",		"s,t",		0x70000005, 0xfc00ffff, RD_1|RD_2|MOD_HILO,     0,		I32|N55|LX,	0,	I37 },
+ {"msubu",		"7,s,t",	0x70000005, 0xfc00e7ff, RD_2|RD_3|MOD_a,        0,              0,		D32,	0 },
+ {"mtbpc",		"t",		0x4080c000, 0xffe0ffff,	RD_1|WR_C0|CM,		0,		EE,		0,	0 },
+ /* mtps overlaps with mtc0, so it's here to take precedence.  */
+@@ -1845,8 +1846,8 @@
+ {"sb",			"t,o(b)",	0xa0000000, 0xfc000000,	RD_1|RD_3|SM,		0,		I1,		0,	0 },
+ {"sb",			"t,A(b)",	0,    (int) M_SB_AB,	INSN_MACRO,		0,		I1,		0,	0 },
+ {"sc",			"t,+j(b)",	0x7c000026, 0xfc00007f, MOD_1|RD_3|SM,		0,		I37,		0,	0 },
+-{"sc",			"t,o(b)",	0xe0000000, 0xfc000000, MOD_1|RD_3|SM,		0,		I2,		0,	EE|I37 },
+-{"sc",			"t,A(b)",	0,    (int) M_SC_AB,	INSN_MACRO,		0,		I2,		0,	EE },
++{"sc",			"t,o(b)",	0xe0000000, 0xfc000000, MOD_1|RD_3|SM,		0,		I2|LX,		0,	EE|I37 },
++{"sc",			"t,A(b)",	0,    (int) M_SC_AB,	INSN_MACRO,		0,		I2|LX,		0,	EE },
+ {"scd",			"t,+j(b)",	0x7c000027, 0xfc00007f, MOD_1|RD_3|SM,		0,		I69,		0,	0 },
+ {"scd",			"t,o(b)",	0xf0000000, 0xfc000000, MOD_1|RD_3|SM,		0,		I3,		0,	EE|I69 },
+ {"scd",			"t,A(b)",	0,    (int) M_SCD_AB,	INSN_MACRO,		0,		I3,		0,	EE },
+@@ -1861,9 +1862,9 @@
+ {"sdbbp",		"c",		0x0000000e, 0xfc00ffff,	TRAP,			0,		G2,		0,	0 },
+ {"sdbbp",		"c,q",		0x0000000e, 0xfc00003f,	TRAP,			0,		G2,		0,	0 },
+ {"sdbbp",		"",		0x0000000e, 0xffffffff, TRAP,           	0,		I37,		0,	0 },
+-{"sdbbp",		"",		0x7000003f, 0xffffffff, TRAP,           	0,		I32,		0,	I37 },
++{"sdbbp",		"",		0x7000003f, 0xffffffff, TRAP,           	0,		I32|LX,		0,	I37 },
+ {"sdbbp",		"B",		0x0000000e, 0xfc00003f, TRAP,           	0,		I37,		0,	0 },
+-{"sdbbp",		"B",		0x7000003f, 0xfc00003f, TRAP,           	0,		I32,		0,	I37 },
++{"sdbbp",		"B",		0x7000003f, 0xfc00003f, TRAP,           	0,		I32|LX,		0,	I37 },
+ {"sdc1",		"T,o(b)",	0xf4000000, 0xfc000000, RD_1|RD_3|SM|FP_D,	0,		I2,		0,	SF },
+ {"sdc1",		"E,o(b)",	0xf4000000, 0xfc000000, RD_1|RD_3|SM|FP_D,	0,		I2,		0,	SF },
+ {"sdc1",		"T,A(b)",	0,    (int) M_SDC1_AB,	INSN_MACRO,		INSN2_M_FP_D,	I2,		0,	SF },
+@@ -2026,7 +2027,7 @@
+ {"sync_release",	"",		0x0000048f, 0xffffffff,	NODS,			AL,		I33,		0,	0 },
+ {"sync_rmb",		"",		0x000004cf, 0xffffffff,	NODS,			AL,		I33,		0,	0 },
+ {"sync_wmb",		"",		0x0000010f, 0xffffffff,	NODS,			AL,		I33,		0,	0 },
+-{"sync",		"",		0x0000000f, 0xffffffff,	NODS,			0,		I2|G1,		0,	0 },
++{"sync",		"",		0x0000000f, 0xffffffff,	NODS,			0,		I2|G1|LX,	0,	0 },
+ {"sync",		"1",		0x0000000f, 0xfffff83f,	NODS,			0,		I32,		0,	0 },
+ {"sync.p",		"",		0x0000040f, 0xffffffff,	NODS,			0,		I2,		0,	0 },
+ {"sync.l",		"",		0x0000000f, 0xffffffff,	NODS,			0,		I2,		0,	0 },
+@@ -3361,6 +3362,11 @@
+ /* RFE conflicts with the new Virt spec instruction tlbgp. */
+ {"rfe",			"",		0x42000010, 0xffffffff,	0,			0,		I1|T3,		0,	I3_32|ALX },
+ 
++/* Lexra-specific instructions (RLX4181/LX4380/LX5380) */
++{"sleep",		"",		0x42000038, 0xffffffff,	0,			0,		LX,		0,	0 },
++{"mflxc0",		"t,G",		0x40600000, 0xffe007ff,	WR_1|RD_C0|LC,		0,		LX,		0,	0 },
++{"mtlxc0",		"t,G",		0x40e00000, 0xffe007ff,	RD_1|WR_C0|CM,		0,		LX,		0,	0 },
++
+ /* Coprocessor 2 move/branch operations overlap with VR5400 .ob format
+    instructions so they are here for the latters to take precedence.  */
+ {"bc2eqz",		"E,p",		0x49200000, 0xffe00000, RD_C2|CBD,		0,		I37,		0,	0 },

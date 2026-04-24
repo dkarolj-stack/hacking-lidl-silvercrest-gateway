@@ -6,7 +6,7 @@ Replacement bootloader for the Lidl Silvercrest Zigbee gateway (RTL8196E SoC).
 
 This is the **last missing piece** that makes the entire gateway firmware stack fully open-source — from bootloader to kernel, rootfs, and Zigbee radio firmware.
 
-**Modern toolchain** — Built with GCC 8.5 / musl (crosstool-NG), replacing the legacy Realtek RSDK (GCC 4.6). The code has been simplified and made portable to standard toolchains.
+**Modern toolchain** — Built with the project's Lexra cross-toolchain (GCC 15 / binutils 2.45 / musl 1.2, crosstool-NG), replacing the legacy Realtek RSDK (GCC 4.6). The code has been simplified and made portable to standard toolchains.
 
 **Clean boot header** — The stock bootloader prints verbose, cluttered output. This version shows only what matters:
 
@@ -84,9 +84,9 @@ The bootloader auto-detects the image type and flashes it. After flashing, reboo
 Same workflow — just send the image with the right Realtek header:
 
 ```bash
-tftp -m binary 192.168.1.6 -c put rootfs.bin     # Will not reboot
-tftp -m binary 192.168.1.6 -c put userdata.bin   # Will not reboot
-tftp -m binary 192.168.1.6 -c put kernel.img     # Will reboot
+tftp -m binary 192.168.1.6 -c put rootfs.bin        # Will not reboot
+tftp -m binary 192.168.1.6 -c put userdata.bin      # Will not reboot
+tftp -m binary 192.168.1.6 -c put kernel-6.18.img   # Will reboot
 ```
 
 The bootloader identifies each image by its header signature and writes it to the correct flash partition.

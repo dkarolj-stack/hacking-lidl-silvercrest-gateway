@@ -1,0 +1,10 @@
+--- a/drivers/net/Makefile
++++ b/drivers/net/Makefile
+@@ -54,6 +54,7 @@
+ obj-y += dsa/
+ endif
+ obj-$(CONFIG_ETHERNET) += ethernet/
++obj-$(CONFIG_RTL8196E_UART_BRIDGE) += rtl8196e-uart-bridge/
+ obj-$(CONFIG_FDDI) += fddi/
+ obj-$(CONFIG_HIPPI) += hippi/
+ obj-$(CONFIG_HAMRADIO) += hamradio/

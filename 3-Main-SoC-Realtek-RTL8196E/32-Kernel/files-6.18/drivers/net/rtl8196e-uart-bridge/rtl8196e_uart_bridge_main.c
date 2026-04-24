@@ -1,0 +1,1183 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * rtl8196e_uart_bridge_main.c - In-kernel UART<->TCP byte shoveler.
+ *
+ * Replaces the former userspace serialgateway daemon (removed in v3.0).
+ * All configuration goes through module parameters exposed in
+ *   /sys/module/rtl8196e_uart_bridge/parameters/
+ * Writes to these files are applied live, so the baud rate or listen port
+ * can be changed at runtime without rebooting or rebuilding the kernel:
+ *
+ *   tty                    — tty device path (default "/dev/ttyS1")              [rw, root]
+ *   baud                   — UART baud rate (default 115200)                     [rw]
+ *   port                   — TCP listen port (default 8888)                      [rw, root]
+ *   bind_addr              — TCP bind address (default "0.0.0.0" = all)          [rw, root]
+ *   flow_control           — hardware RTS/CTS (default 1; 0 for EFR32 flash)     [rw]
+ *   enable                 — arm/disarm the bridge (default 0)                   [rw]
+ *   armed                  — actual bridge state (read-only)                     [ro]
+ *   stats                  — rx/tx/drop counters (read-only)                     [ro]
+ *   status_led_brightness  — brightness fired on 'uart-bridge-client' LED
+ *                            trigger when a TCP client is connected (default 255) [rw]
+ *
+ * Boot sequence: the module loads with enable=0 and does nothing.
+ * The init script S50uart_bridge sets the baud rate and writes
+ * enable=1 once /dev/ttyS1 exists.
+ *
+ * Rationale and architecture: see DESIGN.md in this directory.
+ */
+#include <linux/init.h>
+#include <linux/kernel.h>
+#include <linux/module.h>
+#include <linux/tty.h>
+#include <linux/tty_port.h>
+#include <linux/kthread.h>
+#include <linux/delay.h>
+#include <linux/mutex.h>
+#include <linux/namei.h>
+#include <linux/fs.h>
+#include <linux/dcache.h>
+#include <linux/errno.h>
+#include <linux/net.h>
+#include <linux/socket.h>
+#include <linux/in.h>
+#include <linux/inet.h>
+#include <linux/uio.h>
+#include <linux/string.h>
+#include <linux/leds.h>
+#include <net/sock.h>
+#include <net/tcp.h>
+
+#define DRV_NAME    "rtl8196e-uart-bridge"
+#define DRV_VERSION "1.0"
+
+static DEFINE_MUTEX(bridge_lock);
+
+/* ------------------------------------------------------------------ state */
+
+static struct bridge_state {
+	struct tty_struct  *tty;
+	struct socket      *listen_sock;
+	struct socket      *client_sock;
+	struct task_struct *worker;
+	bool                armed;
+	/*
+	 * Set under bridge_lock by disarm / reconfig_listen paths BEFORE they
+	 * call kthread_stop(), cleared at next arm (or after the new worker is
+	 * installed by reconfig_listen). The worker consults it under the
+	 * same lock right after kernel_accept() returns a fresh client, so a
+	 * connection that sneaks in during the tear-down window is released
+	 * immediately instead of being installed as state.client_sock (which
+	 * the outgoing disarm would then no longer know about).
+	 */
+	bool                stopping_worker;
+	/* stats */
+	u64 rx_bytes;      /* UART -> TCP forwarded */
+	u64 tx_bytes;      /* TCP -> UART forwarded */
+	u64 drops_nocli;   /* UART bytes dropped: no client connected */
+	u64 drops_err;     /* UART bytes dropped: sendmsg error */
+	u64 drops_tx;      /* TCP bytes dropped: tty->write short */
+} state;
+
+/* ----------------------------------------------------------- module params */
+
+static char rtl_tty[64]       = "/dev/ttyS1";
+static int  rtl_baud          = 115200;
+static int  rtl_port          = 8888;
+static char rtl_bind[64]      = "0.0.0.0";
+static bool rtl_flow_control  = true;   /* CRTSCTS; 0 during EFR32 flash */
+static bool rtl_enable        = false;
+
+/* Status LED control: fire an LED trigger when a TCP client is connected,
+ * clear it on disconnect. Mirrors the pre-v3.0 serialgateway behaviour
+ * where the STATUS LED reflected "Zigbee host connected".
+ *
+ * Brightness is configurable (0-255) so S50uart_bridge can map it to the
+ * eth0 led_mode (bright=255, dim=60, off=0) before arming. Users bind the
+ * trigger to the physical LED with:
+ *   echo uart-bridge-client > /sys/class/leds/status/trigger
+ */
+#define BRIDGE_LED_TRIG_NAME "uart-bridge-client"
+static struct led_trigger *bridge_led_trig;
+static int rtl_status_led_brightness = 255;
+
+/* Forward decls: defined below but referenced by param set callbacks. */
+static int  bridge_arm_locked(void);
+static void bridge_disarm_locked(void);
+static int  bridge_reconfig_baud_locked(void);
+static int  bridge_reconfig_listen_locked(void);
+
+/* --------------------------------------------------------------- hot path */
+
+/*
+ * UART -> TCP hot path.
+ *
+ * Installed directly as tty_port->client_ops.receive_buf, not via a
+ * line discipline. Bypasses tty_port_default_receive_buf (which would
+ * do an extra tty_ldisc_ref/deref round-trip and then call
+ * tty_ldisc_receive_buf) and avoids the legacy receive_room gate that
+ * ate our bytes in the previous ldisc-based iteration.
+ *
+ * Runs in the tty flip-buffer workqueue (process context, single
+ * threaded per tty_port). Flow control is at the TCP sendmsg level:
+ * MSG_DONTWAIT + drop-count on EAGAIN. We always consume the full
+ * `count` (what we tell the tty core we ate) because the return value
+ * is what the core uses for its own flow control and we'd rather drop
+ * inside our stats than stall the flip buffer.
+ *
+ * Pattern lifted from drivers/tty/serdev/serdev-ttyport.c.
+ */
+static size_t bridge_port_receive_buf(struct tty_port *port, const u8 *cp,
+				      const u8 *fp, size_t count)
+{
+	struct msghdr msg = { .msg_flags = MSG_DONTWAIT | MSG_NOSIGNAL };
+	struct kvec vec = { .iov_base = (void *)cp, .iov_len = count };
+	int ret;
+
+	mutex_lock(&bridge_lock);
+	if (!state.client_sock) {
+		state.drops_nocli += count;
+		mutex_unlock(&bridge_lock);
+		return count;
+	}
+
+	ret = kernel_sendmsg(state.client_sock, &msg, &vec, 1, count);
+	if (ret > 0) {
+		state.rx_bytes += ret;
+		if ((size_t)ret < count)
+			state.drops_err += count - ret;
+	} else if (ret == -EAGAIN || ret == -EWOULDBLOCK) {
+		state.drops_err += count;
+	} else {
+		/* Unrecoverable sendmsg error (peer closed, reset, etc.).
+		 *
+		 * We intentionally do NOT sock_release() here: the worker
+		 * thread may still be blocked inside kernel_recvmsg() on
+		 * the same socket. Releasing from this context would leave
+		 * the worker dereferencing a freed socket (UAF). It would
+		 * also race the disarm path, which could sock_release the
+		 * same pointer (double free).
+		 *
+		 * But we DO kernel_sock_shutdown() it: that wakes the worker
+		 * out of kernel_recvmsg() right away (next recvmsg returns
+		 * 0/-EPIPE) instead of waiting for TCP keepalive or the
+		 * peer's FIN, which can take seconds. The worker then
+		 * releases the socket through its own cleanup path. Safe
+		 * because kernel_sock_shutdown only flips the socket state;
+		 * it does not free anything. Ownership of the final
+		 * sock_release stays with the worker (or with the disarm
+		 * path if disarm gets there first).
+		 */
+		state.drops_err += count;
+		kernel_sock_shutdown(state.client_sock, SHUT_RDWR);
+		pr_warn_ratelimited(DRV_NAME ": client sendmsg=%d, dropping %zu bytes\n",
+				    ret, count);
+	}
+	mutex_unlock(&bridge_lock);
+	return count;
+}
+
+/* ------------------------------------------------------------- worker thread
+ *
+ * Single thread that handles both directions for the current client:
+ *   phase 1 — block in kernel_accept() until a client connects
+ *   phase 2 — block in kernel_recvmsg(client) and shovel bytes to the UART
+ *             until the client disconnects or the bridge is shut down
+ *
+ * UART -> TCP bytes flow through bridge_receive_buf() (tty rx worker context),
+ * which sendmsgs directly on state.client_sock. The worker never participates
+ * in that direction.
+ */
+
+/*
+ * Bounded TTY write helper: retries short writes up to a small budget so a
+ * TCP burst that outruns the 8250 tx_buf doesn't get truncated on the first
+ * partial write. Without this, any write that only takes N<len bytes would
+ * drop (len-N) silently — which breaks TCP's reliable byte-stream contract
+ * and corrupts ASH/EZSP framing.
+ *
+ * Design constraints on RTL8196E / Lexra RLX4181:
+ *   - single-core, no spinning: we sleep briefly between attempts
+ *   - CPU-constrained: bounded number of retries (no unbounded loop)
+ *   - no sleep under any kernel lock (caller holds none here)
+ *   - drops_tx still accounts for bytes that truly didn't make it out
+ */
+static int bridge_tty_write_bounded(struct tty_struct *tty,
+				    const u8 *buf, int len)
+{
+	int done = 0;
+	int idle = 0;
+
+	while (done < len && !kthread_should_stop()) {
+		int ret;
+
+		if (!tty || !tty->ops || !tty->ops->write)
+			break;
+
+		ret = tty->ops->write(tty, buf + done, len - done);
+		if (ret > 0) {
+			done += ret;
+			idle = 0;
+			continue;
+		}
+
+		/* Zero or negative return: no progress. Bail after a few
+		 * short sleeps rather than busy-looping — on a single-core
+		 * Lexra every spin is a spin the UART TX fifo can't use.
+		 */
+		if (++idle >= 4)
+			break;
+
+		usleep_range(1000, 2000);
+	}
+
+	return done;
+}
+
+static int bridge_worker_thread(void *data)
+{
+	u8 buf[512];
+
+	while (!kthread_should_stop()) {
+		struct socket *newsock = NULL;
+		int ret, last_recv = 0;
+
+		/* ---- phase 1: accept ----
+		 * READ_ONCE: intentional lockless read. Lifecycle is protected
+		 * by the synchronous kthread_stop() in bridge_disarm_locked()
+		 * which runs before state.listen_sock is cleared. READ_ONCE
+		 * documents the concurrency contract and prevents the compiler
+		 * from splitting the load.
+		 */
+		ret = kernel_accept(READ_ONCE(state.listen_sock), &newsock, 0);
+		if (kthread_should_stop())
+			break;
+		if (ret < 0) {
+			if (ret == -EINTR)
+				continue;
+			msleep_interruptible(100);
+			continue;
+		}
+
+		tcp_sock_set_nodelay(newsock->sk);
+		sock_set_keepalive(newsock->sk);
+
+		mutex_lock(&bridge_lock);
+		/* Disarm/reconfig tear-down window: if the bridge is stopping
+		 * or the worker is being replaced, drop this connection on the
+		 * floor rather than install it as state.client_sock. Otherwise
+		 * the outgoing disarm would have no reference to the new sock
+		 * and kthread_stop() could block in kernel_recvmsg() forever.
+		 */
+		if (state.stopping_worker || !state.armed) {
+			mutex_unlock(&bridge_lock);
+			sock_release(newsock);
+			continue;
+		}
+		if (state.client_sock) {
+			struct socket *old = state.client_sock;
+
+			state.client_sock = NULL;
+			mutex_unlock(&bridge_lock);
+			pr_info(DRV_NAME ": replacing previous client\n");
+			sock_release(old);
+			mutex_lock(&bridge_lock);
+			/* Re-check after we released the lock for sock_release:
+			 * a disarm/reconfig could have claimed ownership in that
+			 * window. If so, drop newsock instead of installing it.
+			 */
+			if (state.stopping_worker || !state.armed) {
+				mutex_unlock(&bridge_lock);
+				sock_release(newsock);
+				continue;
+			}
+		}
+		state.client_sock = newsock;
+		mutex_unlock(&bridge_lock);
+
+		/* Light the STATUS LED (clamped to 0-255). Idempotent: the
+		 * replace-client edge case above also lands here, so the LED
+		 * stays on across a client swap. */
+		led_trigger_event(bridge_led_trig,
+				  clamp(rtl_status_led_brightness, 0, 255));
+
+		{
+			struct sockaddr_in peer;
+
+			if (kernel_getpeername(newsock,
+					       (struct sockaddr *)&peer) >= 0)
+				pr_info(DRV_NAME ": client connected from %pI4:%u\n",
+					&peer.sin_addr, ntohs(peer.sin_port));
+			else
+				pr_info(DRV_NAME ": client connected\n");
+		}
+
+		/* ---- phase 2: TCP -> UART shovel ---- */
+		while (!kthread_should_stop()) {
+			struct kvec vec = { .iov_base = buf, .iov_len = sizeof(buf) };
+			struct msghdr msg = { .msg_flags = 0 };
+			int n, written;
+			struct tty_struct *tty;
+
+			n = kernel_recvmsg(newsock, &msg, &vec, 1, sizeof(buf), 0);
+			if (n == -EINTR)
+				continue;
+			if (n <= 0) {
+				last_recv = n;
+				break; /* disconnect, error, or shutdown */
+			}
+
+			/* Inject into the tty TX path via a bounded retry
+			 * helper. Short writes against the 8250 tx_buf are
+			 * expected under burst; without retries they would
+			 * corrupt the byte-stream (drops_tx++ would account
+			 * for the loss but ASH/EZSP re-framing would break).
+			 *
+			 * Snapshot state.tty under the lock, then release the
+			 * lock *before* the retry loop. The write loop can
+			 * sleep (usleep_range), and we don't want to hold
+			 * bridge_lock across sleeps — bridge_port_receive_buf
+			 * grabs the same lock in the UART->TCP hot path, and
+			 * we'd stall it for the whole retry budget on the
+			 * single-core Lexra CPU. tty is kept valid for the
+			 * whole worker lifetime: disarm calls kthread_stop()
+			 * BEFORE tty_kclose(), so we never race against tty
+			 * teardown.
+			 *
+			 * We intentionally do NOT set TTY_DO_WRITE_WAKEUP:
+			 * bridge_port_write_wakeup() is a deliberate no-op,
+			 * so enabling it would just make the tty core fire
+			 * empty callbacks after every TX drain — pure
+			 * overhead on the single-core Lexra CPU.
+			 */
+			mutex_lock(&bridge_lock);
+			tty = state.tty;
+			mutex_unlock(&bridge_lock);
+
+			written = bridge_tty_write_bounded(tty, buf, n);
+
+			mutex_lock(&bridge_lock);
+			state.tx_bytes += written;
+			if (written < n)
+				state.drops_tx += n - written;
+			mutex_unlock(&bridge_lock);
+		}
+
+		/* ---- disconnect: release the client if still ours ---- */
+		pr_info(DRV_NAME ": client disconnected (recvmsg=%d%s)\n",
+			last_recv, last_recv == 0 ? " EOF" : "");
+		/* Extinguish the STATUS LED. A replace-client path clears
+		 * state.client_sock under lock then re-lights it on the new
+		 * accept, so flashing off here briefly is harmless. */
+		led_trigger_event(bridge_led_trig, 0);
+		mutex_lock(&bridge_lock);
+		if (state.client_sock == newsock) {
+			state.client_sock = NULL;
+			mutex_unlock(&bridge_lock);
+			sock_release(newsock);
+		} else {
+			mutex_unlock(&bridge_lock);
+			/* Someone else swapped it; they own the release. */
+		}
+	}
+	return 0;
+}
+
+/*
+ * tty_wakeup() in the tty core calls port->client_ops->write_wakeup()
+ * unconditionally (no NULL check). The 8250 driver fires this every time
+ * it drains its TX buffer, so leaving this NULL is a free kernel oops.
+ * Our worker thread doesn't actually wait on a write_wakeup event — it
+ * just writes and drops on partial — so the wakeup is a no-op for us.
+ */
+static void bridge_port_write_wakeup(struct tty_port *port)
+{
+}
+
+/* ------------------------------------------------------ tty_port client_ops
+ *
+ * We install this directly on tty->port->client_ops at arm time and
+ * restore tty_port_default_client_ops on disarm. No line discipline in
+ * the hot path: the tty flip buffer workqueue calls us directly.
+ */
+static const struct tty_port_client_operations bridge_port_client_ops = {
+	.receive_buf  = bridge_port_receive_buf,
+	.write_wakeup = bridge_port_write_wakeup,
+};
+
+/* ------------------------------------------------------ path -> dev_t look */
+
+static int resolve_tty_devt(const char *tty_path, dev_t *out)
+{
+	struct path p;
+	struct inode *inode;
+	int ret;
+
+	ret = kern_path(tty_path, LOOKUP_FOLLOW, &p);
+	if (ret)
+		return ret;
+
+	inode = d_backing_inode(p.dentry);
+	if (!inode || !S_ISCHR(inode->i_mode)) {
+		path_put(&p);
+		return -ENOTTY;
+	}
+	*out = inode->i_rdev;
+	path_put(&p);
+	return 0;
+}
+
+/* ----------------------------------------------------------- tty configure */
+
+static int bridge_apply_termios(struct tty_struct *tty, int baud)
+{
+	struct ktermios k;
+	int ret;
+
+	k = tty->termios;
+	/* Raw 8N1, carrier-detect ignored; RTS/CTS per rtl_flow_control. */
+	k.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP |
+		       INLCR | IGNCR | ICRNL | IXON);
+	k.c_oflag &= ~OPOST;
+	k.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
+	k.c_cflag &= ~(CSIZE | PARENB | CBAUD | CRTSCTS);
+	k.c_cflag |= CS8 | CLOCAL | CREAD;
+	if (rtl_flow_control)
+		k.c_cflag |= CRTSCTS;
+	tty_termios_encode_baud_rate(&k, baud, baud);
+
+	ret = tty_set_termios(tty, &k);
+	pr_debug(DRV_NAME ": termios applied: requested=%d ospeed=%u ispeed=%u cflag=0x%x ret=%d\n",
+		 baud, tty->termios.c_ospeed, tty->termios.c_ispeed,
+		 tty->termios.c_cflag, ret);
+	return ret;
+}
+
+/* ----------------------------------------------------- listen socket setup */
+
+static int bridge_create_listen_sock(int port, const char *bind_addr,
+				     struct socket **out)
+{
+	struct socket *sock;
+	struct sockaddr_in addr;
+	__be32 ip = htonl(INADDR_ANY);
+	int ret;
+
+	if (bind_addr && bind_addr[0] &&
+	    !in4_pton(bind_addr, -1, (u8 *)&ip, -1, NULL)) {
+		pr_err(DRV_NAME ": invalid bind address '%s'\n", bind_addr);
+		return -EINVAL;
+	}
+
+	ret = sock_create_kern(&init_net, AF_INET, SOCK_STREAM, IPPROTO_TCP,
+			       &sock);
+	if (ret)
+		return ret;
+
+	sock_set_reuseaddr(sock->sk);
+
+	memset(&addr, 0, sizeof(addr));
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons((u16)port);
+	addr.sin_addr.s_addr = ip;
+
+	ret = kernel_bind(sock, (struct sockaddr *)&addr, sizeof(addr));
+	if (ret)
+		goto fail;
+
+	ret = kernel_listen(sock, 1);
+	if (ret)
+		goto fail;
+
+	*out = sock;
+	return 0;
+fail:
+	sock_release(sock);
+	return ret;
+}
+
+/* ----------------------------------------------------------- arm / disarm */
+
+/* Must be called with bridge_lock held. */
+static int bridge_arm_locked(void)
+{
+	struct tty_struct *tty = NULL;
+	struct socket *ls = NULL;
+	struct task_struct *th = NULL;
+	dev_t devt;
+	int ret;
+
+	if (state.armed)
+		return 0;
+
+	ret = resolve_tty_devt(rtl_tty, &devt);
+	if (ret) {
+		pr_err(DRV_NAME ": cannot resolve %s: %d\n", rtl_tty, ret);
+		return ret;
+	}
+
+	tty = tty_kopen_exclusive(devt);
+	if (IS_ERR(tty)) {
+		ret = PTR_ERR(tty);
+		pr_err(DRV_NAME ": tty_kopen_exclusive(%s) failed: %d\n",
+		       rtl_tty, ret);
+		return ret;
+	}
+
+	/* tty_kopen_exclusive returns with tty_lock held but has NOT called
+	 * the driver's ops->open — that's what actually asserts DTR/RTS and
+	 * enables the UART RX path. Serdev does the same thing here.
+	 */
+	if (!tty->ops->open || !tty->ops->close) {
+		tty_unlock(tty);
+		tty_kclose(tty);
+		pr_err(DRV_NAME ": tty ops missing open/close\n");
+		return -ENODEV;
+	}
+	ret = tty->ops->open(tty, NULL);
+	tty_unlock(tty);
+	if (ret) {
+		pr_err(DRV_NAME ": tty ops->open failed: %d\n", ret);
+		tty_kclose(tty);
+		return ret;
+	}
+
+	ret = bridge_apply_termios(tty, rtl_baud);
+	if (ret) {
+		pr_err(DRV_NAME ": apply termios failed: %d\n", ret);
+		goto err_tty;
+	}
+
+	/* Install our port client_ops. This replaces the default
+	 * (tty_port_default_client_ops) which would forward bytes through
+	 * the ldisc layer; we want to bypass the ldisc entirely and take
+	 * the bytes directly from the flip buffer. Serdev does the same.
+	 * Writes to port->client_ops aren't synchronized by the core, so
+	 * we swap under tty_lock() to block any concurrent close path.
+	 */
+	tty_lock(tty);
+	tty->port->client_ops = &bridge_port_client_ops;
+	tty_unlock(tty);
+
+	ret = bridge_create_listen_sock(rtl_port, rtl_bind, &ls);
+	if (ret) {
+		pr_err(DRV_NAME ": listen on %s:%d failed: %d\n",
+		       rtl_bind, rtl_port, ret);
+		goto err_client_ops;
+	}
+
+	state.tty = tty;
+	/* WRITE_ONCE: publishes the socket to the worker's lockless
+	 * READ_ONCE(state.listen_sock) in the accept loop. Happens
+	 * before kthread_run so there's no pre-existing reader yet.
+	 */
+	WRITE_ONCE(state.listen_sock, ls);
+	state.rx_bytes = 0;
+	state.tx_bytes = 0;
+	state.drops_nocli = 0;
+	state.drops_err = 0;
+	state.drops_tx = 0;
+
+	th = kthread_run(bridge_worker_thread, NULL, DRV_NAME "-worker");
+	if (IS_ERR(th)) {
+		ret = PTR_ERR(th);
+		pr_err(DRV_NAME ": accept kthread failed: %d\n", ret);
+		state.tty = NULL;
+		WRITE_ONCE(state.listen_sock, NULL);
+		goto err_sock;
+	}
+	state.worker = th;
+	/* Clear any sticky stopping_worker left over from a previous disarm
+	 * cycle — this is a fresh worker bound to a fresh listen socket. */
+	state.stopping_worker = false;
+	state.armed = true;
+
+	pr_info(DRV_NAME ": armed on %s @ %d baud, listening on %s:%d\n",
+		rtl_tty, rtl_baud, rtl_bind, rtl_port);
+	return 0;
+
+err_sock:
+	sock_release(ls);
+err_client_ops:
+	tty_lock(tty);
+	tty->port->client_ops = &tty_port_default_client_ops;
+	tty_unlock(tty);
+err_tty:
+	tty_lock(tty);
+	if (tty->ops->close)
+		tty->ops->close(tty, NULL);
+	tty_unlock(tty);
+	tty_kclose(tty);
+	return ret;
+}
+
+/* Must be called with bridge_lock held. */
+static void bridge_disarm_locked(void)
+{
+	struct task_struct *th;
+	struct tty_struct *tty;
+	struct socket *ls, *cs;
+	u64 rx, tx, dn, de, dtx;
+
+	if (!state.armed)
+		return;
+
+	/* Capture refs. Two different concerns:
+	 *
+	 *  - state.client_sock is ALWAYS accessed under bridge_lock, so it's
+	 *    safe to claim (NULL under lock) immediately. Any racing
+	 *    receive_buf that grabs the lock after us will see NULL and
+	 *    take its early-return path (drops_nocli++). This also prevents
+	 *    the original double-free: receive_buf's own error path NULLs
+	 *    state.client_sock under lock — if it ran after our capture but
+	 *    before our NULL, both sides would try sock_release(cs).
+	 *
+	 *  - state.listen_sock is read UNLOCKED by the worker thread in
+	 *    kernel_accept(). NULLing it before kthread_stop() returns
+	 *    races the worker's next loop iteration after our
+	 *    kernel_sock_shutdown() wakes it, causing a NULL deref and
+	 *    kernel oops. So we keep it populated until the worker has
+	 *    actually exited (kthread_stop is synchronous).
+	 */
+	th = state.worker;
+	tty = state.tty;
+	ls = state.listen_sock;
+	cs = state.client_sock;
+	state.client_sock = NULL;
+	state.armed = false;
+	/* Tell the worker to reject any connection it accepts from this
+	 * point on (see bridge_worker_thread). The flag stays set until the
+	 * next arm — disarm never re-arms a worker itself.
+	 */
+	state.stopping_worker = true;
+
+	/* Bridge is going down. Clear the STATUS LED unconditionally —
+	 * idempotent if no client was connected. */
+	led_trigger_event(bridge_led_trig, 0);
+	rx = state.rx_bytes;
+	tx = state.tx_bytes;
+	dn = state.drops_nocli;
+	de = state.drops_err;
+	dtx = state.drops_tx;
+
+	/* Drop the mutex before blocking on socket shutdown / kthread_stop
+	 * so we don't deadlock with receive_buf (which grabs the same lock).
+	 */
+	mutex_unlock(&bridge_lock);
+
+	/* Detach the tty flip-buffer client: any new flip work queued after
+	 * the swap hits tty_port_default_client_ops, not us. Work that was
+	 * already dispatched (client_ops pointer already loaded) will still
+	 * reach bridge_port_receive_buf — that's fine because:
+	 *   - state.client_sock has already been NULLed under bridge_lock
+	 *     above, so the in-flight receive_buf takes its early-return
+	 *     path (drops_nocli++) without touching the socket we're about
+	 *     to release;
+	 *   - the bridge_lock serializes the state read with our writes,
+	 *     so there is no torn view of the pointers.
+	 * We therefore don't need an explicit flip_buf flush here.
+	 */
+	if (tty) {
+		tty_lock(tty);
+		tty->port->client_ops = &tty_port_default_client_ops;
+		tty_unlock(tty);
+	}
+
+	/* Shut down both sockets to unblock whatever the worker is doing
+	 * (kernel_accept on listen_sock, or kernel_recvmsg on client_sock).
+	 * The pointers are still valid (not yet released); the worker may
+	 * dereference them one more time before kthread_should_stop fires,
+	 * which is fine on a shut-down socket.
+	 */
+	if (cs)
+		kernel_sock_shutdown(cs, SHUT_RDWR);
+	if (ls)
+		kernel_sock_shutdown(ls, SHUT_RDWR);
+
+	/* Synchronous wait: worker is guaranteed to have exited after this. */
+	if (th)
+		kthread_stop(th);
+
+	/* Worker is gone — we exclusively own cs/ls. The worker's own
+	 * phase-2 cleanup won't release cs because state.client_sock
+	 * was NULLed before unlock (worker's check state.client_sock ==
+	 * newsock returns false).
+	 */
+	if (cs)
+		sock_release(cs);
+	if (ls)
+		sock_release(ls);
+	if (tty) {
+		tty_lock(tty);
+		if (tty->ops->close)
+			tty->ops->close(tty, NULL);
+		tty_unlock(tty);
+		tty_kclose(tty);
+	}
+
+	pr_info(DRV_NAME ": disarmed (rx=%llu tx=%llu drops_nocli=%llu drops_err=%llu drops_tx=%llu)\n",
+		rx, tx, dn, de, dtx);
+
+	/* Clear the rest of the state under the lock so subsequent sysfs
+	 * readers / receive_buf see a consistent disarmed state.
+	 */
+	mutex_lock(&bridge_lock);
+	state.worker = NULL;
+	state.tty = NULL;
+	/* WRITE_ONCE pairs with the worker's READ_ONCE in the accept loop.
+	 * Safe to clear here because kthread_stop() above has guaranteed
+	 * the worker is no longer running.
+	 */
+	WRITE_ONCE(state.listen_sock, NULL);
+}
+
+/* --------------------------------------------------- live reconfig helpers */
+
+/* Must be called with bridge_lock held. */
+static int bridge_reconfig_baud_locked(void)
+{
+	if (!state.armed || !state.tty)
+		return 0;
+	return bridge_apply_termios(state.tty, rtl_baud);
+}
+
+/* Must be called with bridge_lock held. Rebuilds listen_sock + accept
+ * thread without touching the tty / ldisc. Useful when the port changes.
+ */
+static int bridge_reconfig_listen_locked(void)
+{
+	struct task_struct *th_old, *th_new;
+	struct socket *ls_old, *cs_old, *ls_new = NULL;
+	int ret;
+
+	if (!state.armed)
+		return 0;
+
+	ret = bridge_create_listen_sock(rtl_port, rtl_bind, &ls_new);
+	if (ret)
+		return ret;
+
+	/* Capture old refs. Do NOT swap state.listen_sock to ls_new yet:
+	 * the old worker reads state.listen_sock unlocked in kernel_accept()
+	 * and would otherwise accept on the new socket (meant for the new
+	 * worker) after being woken by shutdown of ls_old.
+	 */
+	th_old = state.worker;
+	ls_old = state.listen_sock;
+	cs_old = state.client_sock;
+	state.client_sock = NULL;
+	/* Reject late accepts on the outgoing worker, symmetric with the
+	 * disarm path. Cleared further below once the replacement worker is
+	 * installed.
+	 */
+	state.stopping_worker = true;
+
+	mutex_unlock(&bridge_lock);
+	/* Unblock old worker from both accept and recvmsg paths */
+	if (cs_old)
+		kernel_sock_shutdown(cs_old, SHUT_RDWR);
+	if (ls_old)
+		kernel_sock_shutdown(ls_old, SHUT_RDWR);
+	if (th_old)
+		kthread_stop(th_old);
+	if (cs_old)
+		sock_release(cs_old);
+	if (ls_old)
+		sock_release(ls_old);
+
+	/* Old worker is gone — safe to install the new listen socket. */
+	mutex_lock(&bridge_lock);
+	state.worker = NULL;
+	/* WRITE_ONCE: makes the new socket visible to the new worker's
+	 * lockless READ_ONCE in the accept loop.
+	 */
+	WRITE_ONCE(state.listen_sock, ls_new);
+
+	th_new = kthread_run(bridge_worker_thread, NULL, DRV_NAME "-worker");
+	if (IS_ERR(th_new)) {
+		ret = PTR_ERR(th_new);
+		pr_err(DRV_NAME ": worker restart failed: %d, disarming\n", ret);
+		WRITE_ONCE(state.listen_sock, NULL);
+		mutex_unlock(&bridge_lock);
+		sock_release(ls_new);
+		mutex_lock(&bridge_lock);
+		/* Fully disarm to avoid a zombie state (armed but no worker/sock) */
+		bridge_disarm_locked();
+		return ret;
+	}
+	state.worker = th_new;
+	/* New worker is armed against the new listen socket — clients it
+	 * accepts from here on are legitimate. */
+	state.stopping_worker = false;
+
+	pr_info(DRV_NAME ": relistening on %s:%d\n", rtl_bind, rtl_port);
+	return 0;
+}
+
+/* ----------------------------------------------------------- param ops */
+
+static int param_set_tty(const char *val, const struct kernel_param *kp)
+{
+	char buf[sizeof(rtl_tty)];
+	ssize_t n;
+	int ret = 0;
+
+	n = strscpy(buf, val, sizeof(buf));
+	if (n < 0)
+		return -ENAMETOOLONG;
+	/* Strip trailing newline if any (sysfs writes include it) */
+	if (n > 0 && buf[n - 1] == '\n')
+		buf[n - 1] = '\0';
+
+	mutex_lock(&bridge_lock);
+	if (strcmp(buf, rtl_tty) == 0) {
+		mutex_unlock(&bridge_lock);
+		return 0;
+	}
+	if (state.armed) {
+		char old_tty[sizeof(rtl_tty)];
+
+		strscpy(old_tty, rtl_tty, sizeof(old_tty));
+		strscpy(rtl_tty, buf, sizeof(rtl_tty));
+		bridge_disarm_locked();
+		ret = bridge_arm_locked();
+		if (ret) {
+			pr_warn(DRV_NAME ": tty=%s failed (%d), rolling back to %s\n",
+				buf, ret, old_tty);
+			strscpy(rtl_tty, old_tty, sizeof(rtl_tty));
+			bridge_arm_locked();
+		}
+	} else {
+		strscpy(rtl_tty, buf, sizeof(rtl_tty));
+	}
+	mutex_unlock(&bridge_lock);
+	return ret;
+}
+
+static int param_get_tty(char *buffer, const struct kernel_param *kp)
+{
+	int n;
+
+	mutex_lock(&bridge_lock);
+	n = scnprintf(buffer, PAGE_SIZE, "%s\n", rtl_tty);
+	mutex_unlock(&bridge_lock);
+	return n;
+}
+
+static const struct kernel_param_ops tty_ops = {
+	.set = param_set_tty,
+	.get = param_get_tty,
+};
+
+static int param_set_baud(const char *val, const struct kernel_param *kp)
+{
+	int new_baud, ret;
+
+	ret = kstrtoint(val, 0, &new_baud);
+	if (ret)
+		return ret;
+	if (new_baud < 1200 || new_baud > 4000000)
+		return -EINVAL;
+
+	mutex_lock(&bridge_lock);
+	if (new_baud != rtl_baud) {
+		int old_baud = rtl_baud;
+
+		rtl_baud = new_baud;
+		ret = bridge_reconfig_baud_locked();
+		if (ret) {
+			pr_warn(DRV_NAME ": baud=%d failed (%d), rolling back to %d\n",
+				new_baud, ret, old_baud);
+			rtl_baud = old_baud;
+			bridge_reconfig_baud_locked();
+		}
+	}
+	mutex_unlock(&bridge_lock);
+	return ret;
+}
+
+static int param_get_baud(char *buffer, const struct kernel_param *kp)
+{
+	int v;
+
+	mutex_lock(&bridge_lock);
+	v = rtl_baud;
+	mutex_unlock(&bridge_lock);
+	return scnprintf(buffer, PAGE_SIZE, "%d\n", v);
+}
+
+static const struct kernel_param_ops baud_ops = {
+	.set = param_set_baud,
+	.get = param_get_baud,
+};
+
+static int param_set_port(const char *val, const struct kernel_param *kp)
+{
+	int new_port, ret;
+
+	ret = kstrtoint(val, 0, &new_port);
+	if (ret)
+		return ret;
+	if (new_port < 1 || new_port > 65535)
+		return -EINVAL;
+
+	mutex_lock(&bridge_lock);
+	if (new_port == rtl_port) {
+		mutex_unlock(&bridge_lock);
+		return 0;
+	}
+	{
+		int old_port = rtl_port;
+
+		rtl_port = new_port;
+		ret = bridge_reconfig_listen_locked();
+		if (ret) {
+			pr_warn(DRV_NAME ": port=%d failed (%d), rolling back to %d\n",
+				new_port, ret, old_port);
+			rtl_port = old_port;
+			bridge_reconfig_listen_locked();
+		}
+	}
+	mutex_unlock(&bridge_lock);
+	return ret;
+}
+
+static int param_get_port(char *buffer, const struct kernel_param *kp)
+{
+	int v;
+
+	mutex_lock(&bridge_lock);
+	v = rtl_port;
+	mutex_unlock(&bridge_lock);
+	return scnprintf(buffer, PAGE_SIZE, "%d\n", v);
+}
+
+static const struct kernel_param_ops port_ops = {
+	.set = param_set_port,
+	.get = param_get_port,
+};
+
+static int param_set_enable(const char *val, const struct kernel_param *kp)
+{
+	bool new_en;
+	int ret;
+
+	ret = kstrtobool(val, &new_en);
+	if (ret)
+		return ret;
+
+	mutex_lock(&bridge_lock);
+	rtl_enable = new_en;
+	if (new_en)
+		ret = bridge_arm_locked();
+	else
+		bridge_disarm_locked();
+	mutex_unlock(&bridge_lock);
+	return ret;
+}
+
+static int param_get_enable(char *buffer, const struct kernel_param *kp)
+{
+	bool v;
+
+	/* rtl_enable is mutated under bridge_lock in param_set_enable; read
+	 * it under the same lock for consistency with the other getters and
+	 * to avoid a data race the compiler is free to tear.
+	 */
+	mutex_lock(&bridge_lock);
+	v = rtl_enable;
+	mutex_unlock(&bridge_lock);
+	return scnprintf(buffer, PAGE_SIZE, "%d\n", v ? 1 : 0);
+}
+
+static const struct kernel_param_ops enable_ops = {
+	.set = param_set_enable,
+	.get = param_get_enable,
+};
+
+static int param_set_bind(const char *val, const struct kernel_param *kp)
+{
+	char buf[sizeof(rtl_bind)];
+	ssize_t n;
+	__be32 test;
+	int ret = 0;
+
+	n = strscpy(buf, val, sizeof(buf));
+	if (n < 0)
+		return -ENAMETOOLONG;
+	if (n > 0 && buf[n - 1] == '\n')
+		buf[n - 1] = '\0';
+
+	/* Validate the address before accepting it */
+	if (buf[0] && !in4_pton(buf, -1, (u8 *)&test, -1, NULL))
+		return -EINVAL;
+
+	mutex_lock(&bridge_lock);
+	if (strcmp(buf, rtl_bind) == 0) {
+		mutex_unlock(&bridge_lock);
+		return 0;
+	}
+	{
+		char old_bind[sizeof(rtl_bind)];
+
+		strscpy(old_bind, rtl_bind, sizeof(old_bind));
+		strscpy(rtl_bind, buf, sizeof(rtl_bind));
+		ret = bridge_reconfig_listen_locked();
+		if (ret) {
+			pr_warn(DRV_NAME ": bind_addr=%s failed (%d), rolling back to %s\n",
+				buf, ret, old_bind);
+			strscpy(rtl_bind, old_bind, sizeof(rtl_bind));
+			bridge_reconfig_listen_locked();
+		}
+	}
+	mutex_unlock(&bridge_lock);
+	return ret;
+}
+
+static int param_get_bind(char *buffer, const struct kernel_param *kp)
+{
+	int n;
+
+	mutex_lock(&bridge_lock);
+	n = scnprintf(buffer, PAGE_SIZE, "%s\n", rtl_bind);
+	mutex_unlock(&bridge_lock);
+	return n;
+}
+
+static const struct kernel_param_ops bind_ops = {
+	.set = param_set_bind,
+	.get = param_get_bind,
+};
+
+/*
+ * flow_control: toggle CRTSCTS at runtime without disarming the bridge.
+ *
+ * Needed by flash_efr32.sh: the Gecko bootloader Xmodem path requires
+ * RTS/CTS off.  Write 0 before flashing and 1 after.  Re-applies termios
+ * through bridge_reconfig_baud_locked() (which re-calls
+ * bridge_apply_termios() with the updated rtl_flow_control value).
+ */
+static int param_set_flow_control(const char *val, const struct kernel_param *kp)
+{
+	bool new_fc;
+	int ret;
+
+	ret = kstrtobool(val, &new_fc);
+	if (ret)
+		return ret;
+
+	mutex_lock(&bridge_lock);
+	if (new_fc != rtl_flow_control) {
+		bool old_fc = rtl_flow_control;
+
+		rtl_flow_control = new_fc;
+		if (state.armed) {
+			ret = bridge_reconfig_baud_locked();
+			if (ret) {
+				pr_warn(DRV_NAME ": flow_control=%d failed (%d), rolling back to %d\n",
+					new_fc, ret, old_fc);
+				rtl_flow_control = old_fc;
+				bridge_reconfig_baud_locked();
+			}
+		}
+	}
+	mutex_unlock(&bridge_lock);
+	return ret;
+}
+
+static int param_get_flow_control(char *buffer, const struct kernel_param *kp)
+{
+	bool v;
+
+	mutex_lock(&bridge_lock);
+	v = rtl_flow_control;
+	mutex_unlock(&bridge_lock);
+	return scnprintf(buffer, PAGE_SIZE, "%d\n", v ? 1 : 0);
+}
+
+static const struct kernel_param_ops flow_control_ops = {
+	.set = param_set_flow_control,
+	.get = param_get_flow_control,
+};
+
+/* Read-only "armed" parameter: actual bridge state (vs. "enable" = intent). */
+static int param_get_armed(char *buffer, const struct kernel_param *kp)
+{
+	bool v;
+
+	mutex_lock(&bridge_lock);
+	v = state.armed;
+	mutex_unlock(&bridge_lock);
+	return scnprintf(buffer, PAGE_SIZE, "%d\n", v ? 1 : 0);
+}
+
+static const struct kernel_param_ops armed_ops = {
+	.get = param_get_armed,
+};
+
+/* Read-only "stats" parameter: live counters without having to disarm. */
+static int param_get_stats(char *buffer, const struct kernel_param *kp)
+{
+	int n;
+
+	mutex_lock(&bridge_lock);
+	n = scnprintf(buffer, PAGE_SIZE,
+		      "rx=%llu tx=%llu drops_nocli=%llu drops_err=%llu drops_tx=%llu\n",
+		      state.rx_bytes, state.tx_bytes,
+		      state.drops_nocli, state.drops_err, state.drops_tx);
+	mutex_unlock(&bridge_lock);
+	return n;
+}
+
+static const struct kernel_param_ops stats_ops = {
+	.get = param_get_stats,
+};
+
+module_param_cb(tty,       &tty_ops,    NULL, 0600);
+MODULE_PARM_DESC(tty,       "TTY device path (default /dev/ttyS1)");
+module_param_cb(baud,      &baud_ops,   NULL, 0644);
+MODULE_PARM_DESC(baud,      "UART baud rate (default 115200)");
+module_param_cb(port,      &port_ops,   NULL, 0600);
+MODULE_PARM_DESC(port,      "TCP listen port (default 8888)");
+module_param_cb(bind_addr, &bind_ops,   NULL, 0600);
+MODULE_PARM_DESC(bind_addr, "TCP bind address (default 0.0.0.0 = all interfaces)");
+module_param_cb(flow_control, &flow_control_ops, NULL, 0644);
+MODULE_PARM_DESC(flow_control, "Hardware RTS/CTS (default 1; set 0 for EFR32 flash)");
+module_param_cb(enable,    &enable_ops, NULL, 0644);
+MODULE_PARM_DESC(enable,    "1=arm bridge, 0=disarm (default 0, arm via init script)");
+module_param_cb(armed,     &armed_ops,  NULL, 0444);
+MODULE_PARM_DESC(armed,     "Actual bridge state (read-only)");
+module_param_cb(stats,     &stats_ops,  NULL, 0444);
+MODULE_PARM_DESC(stats,     "Live rx/tx/drop counters (read-only)");
+module_param_named(status_led_brightness, rtl_status_led_brightness, int, 0644);
+MODULE_PARM_DESC(status_led_brightness,
+	"Brightness 0-255 applied to the '" BRIDGE_LED_TRIG_NAME
+	"' LED trigger when a client is connected (default 255)");
+
+/* ------------------------------------------------------------------ init */
+
+static int __init rtl8196e_uart_bridge_init(void)
+{
+	/* Register the "client connected" LED trigger so userspace can bind
+	 * it to an actual LED (/sys/class/leds/<led>/trigger). The trigger
+	 * persists for the lifetime of the kernel (built-in driver, no
+	 * module unload path). led_trigger_event() is a no-op when nothing
+	 * is bound, so it's safe to fire it unconditionally from the worker. */
+	led_trigger_register_simple(BRIDGE_LED_TRIG_NAME, &bridge_led_trig);
+
+	pr_info(DRV_NAME " v" DRV_VERSION " (J. Nilo): loaded (tty_port client_ops path, no ldisc)\n");
+	return 0;
+}
+/*
+ * Built-in only: Kconfig declares CONFIG_RTL8196E_UART_BRIDGE as bool, not
+ * tristate, so =m is rejected by the build system. This is intentional —
+ * the hot path is expected to live in IRAM via the vmlinux.lds.S gather,
+ * which only collects built-in .iram sections. late_initcall ensures we
+ * run after tty/serial and net subsystems are ready; there is no matching
+ * exit path because the driver is never unloaded.
+ */
+late_initcall(rtl8196e_uart_bridge_init);
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Jacques Nilo");
+MODULE_DESCRIPTION("RTL8196E UART<->TCP kernel bridge");
+MODULE_VERSION(DRV_VERSION);

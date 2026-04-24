@@ -17,6 +17,8 @@ node_modules/
 !3-Main-SoC-Realtek-RTL8196E/31-Bootloader/boot.bin
 *.img
 *.img.gz
+# Exception: shipped kernel flash image
+!3-Main-SoC-Realtek-RTL8196E/32-Kernel/kernel-6.18.img
 
 # Build directories
 build/
@@ -80,12 +82,13 @@ system.map
 
 # Compiled binaries in skeleton (busybox and dropbearmulti tracked in git)
 3-Main-SoC-Realtek-RTL8196E/34-Userdata/skeleton/usr/bin/nano
-3-Main-SoC-Realtek-RTL8196E/34-Userdata/skeleton/usr/bin/serialgateway
-3-Main-SoC-Realtek-RTL8196E/34-Userdata/serialgateway/src/serialgateway
+3-Main-SoC-Realtek-RTL8196E/34-Userdata/boothold/src/boothold
 
 # packages
 packages/
-CLAUDE.md
+
+# CLAUDE.md files: tracked in `private`, stripped at release time before
+# pushing to `origin` (public). See feedback_public_private_workflow memory.
 
 # MkDocs documentation site
 site/

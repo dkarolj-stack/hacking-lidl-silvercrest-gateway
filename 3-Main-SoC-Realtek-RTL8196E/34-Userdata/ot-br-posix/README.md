@@ -18,20 +18,25 @@ The Silabs EFR32 radio must be flashed with the OpenThread RCP firmware
 
 ### 2. Kernel with IPv6 and IEEE 802.15.4
 
-The stock kernel does not include IPv6. You must rebuild with the unified config
-`../32-Kernel/config-5.10.246-realtek.txt` which includes:
+The stock kernel does not include IPv6. You must rebuild with the project config
+`../32-Kernel/config-6.18-realtek.txt` which includes:
 
 ```
 CONFIG_IPV6=y                    # IPv6 networking stack
 CONFIG_IPV6_ROUTER_PREF=y        # Router preference
 CONFIG_IPV6_MULTIPLE_TABLES=y    # Multiple routing tables
-CONFIG_TUN=y                     # TUN/TAP device (for wpan0)
-CONFIG_IEEE802154=y              # IEEE 802.15.4 support
+CONFIG_TUN=y                     # TUN/TAP device (used to create wpan0)
 CONFIG_FILE_LOCKING=y            # Required by otbr-agent settings
 ```
 
-Note: Netfilter is **not** required — the RTL8196E ethernet driver is incompatible
-with it, and `otbr-agent` is built with `OT_FIREWALL=OFF`.
+Note: **CONFIG_IEEE802154 is *not* required**. On this platform otbr-agent
+talks to the EFR32 OT-RCP over UART using spinel-over-HDLC
+(`spinel+hdlc+uart:///dev/ttyS1`), so the 802.15.4 stack runs entirely in
+userspace + the RCP firmware. The kernel only needs a TUN device to
+materialise `wpan0`.
+
+Note: Netfilter is **not** required either — the RTL8196E ethernet driver
+is incompatible with it, and `otbr-agent` is built with `OT_FIREWALL=OFF`.
 
 ### 3. BusyBox with IPv6 and `ip` command
 
@@ -159,8 +164,8 @@ cat build/third_party/openthread/repo/src/posix/ot-ctl | ssh root@GATEWAY_IP:888
 
 The gateway supports both Zigbee and Thread via `/userdata/etc/radio.conf`:
 
-- **Zigbee** (default): no `radio.conf` file, `S60serialgateway` starts
-- **Thread**: `radio.conf` contains `MODE=otbr`, `S70otbr` starts, `S60serialgateway` is skipped
+- **Zigbee** (default): no `radio.conf` file, `S50uart_bridge` arms the in-kernel UART↔TCP bridge
+- **Thread**: `radio.conf` contains `MODE=otbr`, `S70otbr` starts, `S50uart_bridge` is skipped
 
 The mode is selected at flash time via `flash_userdata.sh`.
 
@@ -171,11 +176,11 @@ The mode is selected at flash time via `flash_userdata.sh`.
 The init script `S70otbr` starts otbr-agent automatically at boot (when in Thread mode):
 
 ```bash
-# UART-connected RCP on /dev/ttyS1 at 115200 baud
+# UART-connected RCP on /dev/ttyS1 at 460800 baud (OT-RCP default)
 otbr-agent -I wpan0 -B eth0 \
     --rest-listen-address ::0 --rest-listen-port 8081 \
     --vendor-name "Lidl" --model-name "Silvercrest" \
-    spinel+hdlc+uart:///dev/ttyS1?uart-baudrate=115200
+    spinel+hdlc+uart:///dev/ttyS1?uart-baudrate=460800
 ```
 
 ### Using ot-ctl

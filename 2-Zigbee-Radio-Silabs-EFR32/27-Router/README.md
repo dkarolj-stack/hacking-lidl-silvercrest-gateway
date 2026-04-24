@@ -35,7 +35,7 @@ Pre-built firmware is available in the `firmware/` directory. From the repositor
 # Select [5] Z3-Router
 ```
 
-The script handles everything (serialgateway restart, flash, reboot).
+The script handles everything (switch the in-kernel UART bridge to flash mode, flash, reboot).
 
 The router firmware runs autonomously — no host application needed.
 
@@ -78,8 +78,9 @@ Other formats (.s37, .hex, .bin) are generated in `build/` but not saved.
 
 ### Customization
 
-> **UART baud rate:** Only **115200** (default) and **230400** are reliable on
-> this gateway. 460800+ causes UART overruns. See [25-RCP-UART-HW](../25-RCP-UART-HW/README.md#baudrate-and-network-considerations) for details.
+> **UART baud rate:** Default is **115200**. With the in-kernel UART
+> bridge on kernel 6.18, rates up to **892857** are supported. See
+> [25-RCP-UART-HW](../25-RCP-UART-HW/README.md#baudrate-and-network-considerations) for details.
 
 Edit `patches/z3-router.slcp` to modify network parameters:
 
@@ -224,8 +225,8 @@ The firmware includes a lightweight CLI (~3KB) that allows reflashing without J-
 │   RTL8196E      │───────────────│   EFR32MG1B     │
 │   (Host CPU)    │  TX/RX: PA0/PA1   (Zigbee SoC)  │
 │                 │  RTS/CTS: PA4/PA5               │
-│  serialgateway  │  115200 baud  │  Router FW      │
-│    port 8888    │  Flow control │  + mini-CLI     │
+│  kernel UART    │  115200 baud  │  Router FW      │
+│  bridge :8888   │  Flow control │  + mini-CLI     │
 └─────────────────┘               └─────────────────┘
 ```
 
@@ -234,7 +235,8 @@ The firmware includes a lightweight CLI (~3KB) that allows reflashing without J-
 This is the preferred method because it provides local echo of typed commands.
 
 ```bash
-# Ensure serialgateway is running on the gateway (default after boot)
+# Ensure the gateway runs kernel 6.18 with rtl8196e-uart-bridge armed
+# (automatic via S50uart_bridge at boot)
 
 # From your PC:
 jnilo@jnilo-Key-R:~$ nc 192.168.1.126 8888
@@ -260,7 +262,7 @@ jnilo@jnilo-Key-R:~$
 #### Direct usage from the gateway (via SSH)
 
 ```bash
-~ # killall serialgateway
+~ # echo 0 > /sys/module/rtl8196e_uart_bridge/parameters/enable   # release /dev/ttyS1
 ~ # microcom -s 115200 /dev/ttyS1
 Commands:
   version           - Show stack version
@@ -430,11 +432,13 @@ Connect to the router's serial console to see what's happening:
 
 ```bash
 # On the gateway via SSH:
-killall serialgateway
+echo 0 > /sys/module/rtl8196e_uart_bridge/parameters/enable   # release /dev/ttyS1
 microcom -s 115200 /dev/ttyS1
 # To exit microcom: Ctrl+X
+# Re-arm the bridge afterwards:
+echo 1 > /sys/module/rtl8196e_uart_bridge/parameters/enable
 
-# Or from remote host (if serialgateway is running):
+# Or from remote host (bridge armed as usual):
 nc 192.168.1.88 8888
 # To exit nc: Ctrl+C
 ```

@@ -1,0 +1,21 @@
+From: Jacques Nilo <jacquesnilo@gmail.com>
+Subject: [PATCH] busybox 900-Lexra-off_t-size-check
+
+Disable off_t size check (musl MIPS toolchain mis-detects sizeof(off_t) vs sizeof(uoff_t) at compile time; the struct is a compile-time sentinel, not a real bug)
+
+---
+--- a/include/libbb.h	2024-09-26 16:00:52.000000000 +0200
++++ b/include/libbb.h	2026-04-17 09:08:19.636834983 +0200
+@@ -331,9 +331,12 @@
+  * On musl, !ENABLE_LFS on 32-bit arches thinks that off_t is 32-bit.
+  * We misdetected that. Don't let it build:
+  */
++/* Disabled for OpenWrt musl MIPS toolchain compatibility */
++/*
+ struct BUG_off_t_size_is_misdetected {
+ 	char BUG_off_t_size_is_misdetected[sizeof(off_t) == sizeof(uoff_t) ? 1 : -1];
+ };
++*/
+ 
+ /* Some useful definitions */
+ #undef FALSE

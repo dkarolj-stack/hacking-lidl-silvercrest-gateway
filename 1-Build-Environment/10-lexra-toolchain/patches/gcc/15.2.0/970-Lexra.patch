@@ -1,0 +1,198 @@
+diff -urN gcc-15.2.0/gcc/config/mips/mips.cc gcc-15.2.0-lexra/gcc/config/mips/mips.cc
+--- a/gcc/config/mips/mips.cc	2025-08-08 08:51:40.583349957 +0200
++++ b/gcc/config/mips/mips.cc	2026-04-16 21:11:19.622373249 +0200
+@@ -20473,6 +20473,10 @@
+   if (mips_arch_info == 0)
+     mips_set_architecture (mips_default_arch ());
+ 
++  /* flag_fix_bdsl only works for Taroko processors */
++  if (flag_fix_bdsl && !TARGET_LEXRA)
++    flag_fix_bdsl = false;
++
+   if (ABI_NEEDS_64BIT_REGS && !ISA_HAS_64BIT_REGS)
+     error ("%<-march=%s%> is not compatible with the selected ABI",
+ 	   mips_arch_info->name);
+diff -urN gcc-15.2.0/gcc/config/mips/mips-cpus.def gcc-15.2.0-lexra/gcc/config/mips/mips-cpus.def
+--- a/gcc/config/mips/mips-cpus.def	2025-08-08 08:51:40.579349891 +0200
++++ b/gcc/config/mips/mips-cpus.def	2026-04-16 21:11:19.611373616 +0200
+@@ -176,3 +176,8 @@
+ MIPS_CPU ("i6400", PROCESSOR_I6400, MIPS_ISA_MIPS64R6, 0)
+ MIPS_CPU ("i6500", PROCESSOR_I6400, MIPS_ISA_MIPS64R6, 0)
+ MIPS_CPU ("p6600", PROCESSOR_P6600, MIPS_ISA_MIPS64R6, 0)
++
++/* Lexra processors */
++MIPS_CPU ("lx4380", PROCESSOR_LX4380, MIPS_ISA_MIPS1, 0)
++MIPS_CPU ("lx5280", PROCESSOR_LX5280, MIPS_ISA_MIPS1, 0)
++MIPS_CPU ("lx5380", PROCESSOR_LX5380, MIPS_ISA_MIPS1, 0)
+diff -urN gcc-15.2.0/gcc/config/mips/mips.h gcc-15.2.0-lexra/gcc/config/mips/mips.h
+--- a/gcc/config/mips/mips.h	2025-08-08 08:51:40.583349957 +0200
++++ b/gcc/config/mips/mips.h	2026-04-16 21:11:19.620373315 +0200
+@@ -317,6 +317,12 @@
+ #define TARGET_SR71K                (mips_arch == PROCESSOR_SR71000)
+ #define TARGET_XLP                  (mips_arch == PROCESSOR_XLP)
+ 
++#define TARGET_LX5380    (mips_arch == PROCESSOR_LX5380)
++#define TARGET_LX5280    (mips_arch == PROCESSOR_LX5280)
++#define TARGET_LX4380    (mips_arch == PROCESSOR_LX4380)
++#define TARGET_LEXRA     (mips_arch == PROCESSOR_LX4380 \
++              || mips_arch == PROCESSOR_LX5280 || TARGET_LX5380)
++
+ /* Scheduling target defines.  */
+ #define TUNE_20KC		    (mips_tune == PROCESSOR_20KC)
+ #define TUNE_24K		    (mips_tune == PROCESSOR_24KC	\
+@@ -331,7 +337,7 @@
+ #define TUNE_GS464		    (mips_tune == PROCESSOR_GS464)
+ #define TUNE_GS464E		    (mips_tune == PROCESSOR_GS464E)
+ #define TUNE_GS264E		    (mips_tune == PROCESSOR_GS264E)
+-#define TUNE_MIPS3000               (mips_tune == PROCESSOR_R3000)
++#define TUNE_MIPS3000               (mips_tune == PROCESSOR_R3000 || TARGET_LEXRA)
+ #define TUNE_MIPS3900               (mips_tune == PROCESSOR_R3900)
+ #define TUNE_MIPS4000               (mips_tune == PROCESSOR_R4000)
+ #define TUNE_MIPS4120               (mips_tune == PROCESSOR_R4120)
+@@ -688,6 +694,14 @@
+       if (!ISA_HAS_UNFUSED_MADD4 && !ISA_HAS_FUSED_MADD4)		\
+ 	builtin_define ("__mips_no_madd4");				\
+ 									\
++      if (TARGET_LEXRA)							\
++	builtin_define ("__mlexra");					\
++      if (TARGET_LX4380)						\
++	builtin_define ("__mlx4380");					\
++      if (TARGET_LX5380)						\
++	builtin_define ("__mlx5380");					\
++      if (flag_fix_bdsl)						\
++	builtin_define ("__FIX_BDSL__");				\
+       if (TARGET_CB_NEVER)						\
+ 	builtin_define ("__mips_compact_branches_never");		\
+       else if (TARGET_CB_ALWAYS)					\
+@@ -856,6 +870,7 @@
+   "%{mhard-float|msoft-float|mno-float|march=mips*:; \
+      march=vr41*|march=m4k|march=4k*|march=24kc|march=24kec \
+      |march=34kc|march=34kn|march=74kc|march=1004kc|march=5kc \
++     |march=lx* \
+      |march=m14k*|march=m5101|march=octeon|march=xlr: -msoft-float; \
+      march=*: -mhard-float}"
+ 
+@@ -1093,7 +1108,8 @@
+ #define ISA_HAS_CONDMOVE        (ISA_HAS_FP_CONDMOVE			\
+ 				 || TARGET_MIPS5900			\
+ 				 || ISA_HAS_MIPS16E2			\
+-				 || TARGET_LOONGSON_2EF)
++				 || TARGET_LOONGSON_2EF		\
++				 || (!TARGET_MIPS16 && TARGET_LEXRA))
+ 
+ /* ISA has LDC1 and SDC1.  */
+ #define ISA_HAS_LDC1_SDC1	(!ISA_MIPS1				\
+@@ -1359,7 +1375,7 @@
+ #define ISA_HAS_SYNCI (mips_isa_rev >= 2 && !TARGET_MIPS16)
+ 
+ /* ISA includes sync.  */
+-#define ISA_HAS_SYNC ((mips_isa >= MIPS_ISA_MIPS2 || TARGET_MIPS3900)	\
++#define ISA_HAS_SYNC ((mips_isa >= MIPS_ISA_MIPS2 || TARGET_MIPS3900 || TARGET_LX5380)	\
+ 		      && (!TARGET_MIPS16 || ISA_HAS_MIPS16E2))
+ #define GENERATE_SYNC			\
+   (target_flags_explicit & MASK_LLSC	\
+@@ -1369,7 +1385,7 @@
+ /* ISA includes ll and sc.  Note that this implies ISA_HAS_SYNC
+    because the expanders use both ISA_HAS_SYNC and ISA_HAS_LL_SC
+    instructions.  */
+-#define ISA_HAS_LL_SC (mips_isa >= MIPS_ISA_MIPS2 && !TARGET_MIPS5900	\
++#define ISA_HAS_LL_SC ((mips_isa >= MIPS_ISA_MIPS2 || TARGET_LX5380) && !TARGET_MIPS5900	\
+ 		       && (!TARGET_MIPS16 || ISA_HAS_MIPS16E2))
+ #define GENERATE_LL_SC			\
+   (target_flags_explicit & MASK_LLSC	\
+diff -urN gcc-15.2.0/gcc/config/mips/mips.md gcc-15.2.0-lexra/gcc/config/mips/mips.md
+--- a/gcc/config/mips/mips.md	2025-08-08 08:51:40.584349973 +0200
++++ b/gcc/config/mips/mips.md	2026-04-16 21:11:19.624373182 +0200
+@@ -72,6 +72,9 @@
+   m5100
+   i6400
+   p6600
++  lx4380
++  lx5280
++  lx5380
+ ])
+ 
+ (define_c_enum "unspec" [
+@@ -782,9 +785,13 @@
+ 
+ ;; Can the instruction be put into a delay slot?
+ (define_attr "can_delay" "no,yes"
+-  (if_then_else (and (eq_attr "type" "!branch,call,jump,simd_branch")
+-		     (eq_attr "hazard" "none")
+-		     (match_test "get_attr_insn_count (insn) == 1"))
++  (if_then_else (and (ior (eq (symbol_ref "TARGET_MIPS16") (const_int 0))
++		          (eq (symbol_ref "flag_fix_bdsl") (const_int 0)))
++		     (ior (eq_attr "type" "!load")
++		          (eq (symbol_ref "flag_fix_bdsl") (const_int 0)))
++		     (and (eq_attr "type" "!branch,call,jump,simd_branch")
++			  (eq_attr "hazard" "none")
++			  (match_test "get_attr_insn_count (insn) == 1")))
+ 		(const_string "yes")
+ 		(const_string "no")))
+ 
+@@ -4520,7 +4527,7 @@
+ 	(unspec:GPR [(match_operand:BLK 1 "memory_operand" "m")
+ 		     (match_operand:QI 2 "memory_operand" "ZC")]
+ 		    UNSPEC_LOAD_LEFT))]
+-  "(!TARGET_MIPS16 || ISA_HAS_MIPS16E2)
++  "(!TARGET_MIPS16 || ISA_HAS_MIPS16E2) && !TARGET_LX5280
+     && mips_mem_fits_mode_p (<MODE>mode, operands[1])"
+   "<load>l\t%0,%2"
+   [(set_attr "move_type" "load")
+@@ -4533,7 +4540,7 @@
+ 		     (match_operand:QI 2 "memory_operand" "ZC")
+ 		     (match_operand:GPR 3 "register_operand" "0")]
+ 		    UNSPEC_LOAD_RIGHT))]
+-  "(!TARGET_MIPS16 || ISA_HAS_MIPS16E2)
++  "(!TARGET_MIPS16 || ISA_HAS_MIPS16E2) && !TARGET_LX5280
+     && mips_mem_fits_mode_p (<MODE>mode, operands[1])"
+   "<load>r\t%0,%2"
+   [(set_attr "move_type" "load")
+@@ -4545,7 +4552,7 @@
+ 	(unspec:BLK [(match_operand:GPR 1 "reg_or_0_operand" "dJ")
+ 		     (match_operand:QI 2 "memory_operand" "ZC")]
+ 		    UNSPEC_STORE_LEFT))]
+-  "!TARGET_MIPS16
++  "!TARGET_MIPS16 && !TARGET_LX5280
+    && mips_mem_fits_mode_p (<MODE>mode, operands[0])"
+   "<store>l\t%z1,%2"
+   [(set_attr "move_type" "store")
+@@ -4557,7 +4564,7 @@
+ 		     (match_operand:QI 2 "memory_operand" "ZC")
+ 		     (match_dup 0)]
+ 		    UNSPEC_STORE_RIGHT))]
+-  "!TARGET_MIPS16
++  "!TARGET_MIPS16 && !TARGET_LX5280
+    && mips_mem_fits_mode_p (<MODE>mode, operands[0])"
+   "<store>r\t%z1,%2"
+   [(set_attr "move_type" "store")
+diff -urN gcc-15.2.0/gcc/config/mips/mips.opt gcc-15.2.0-lexra/gcc/config/mips/mips.opt
+--- a/gcc/config/mips/mips.opt	2025-08-08 08:51:40.584349973 +0200
++++ b/gcc/config/mips/mips.opt	2026-04-16 21:11:19.623373216 +0200
+@@ -340,6 +340,10 @@
+ Target Var(TARGET_MCU)
+ Use MCU instructions.
+ 
++mno-bdsl
++Target Var(flag_fix_bdsl) Init(0)
++Forbid the use of load instructions in the branch delay slots for all cases
++
+ mno-flush-func
+ Target RejectNegative
+ Do not use a cache-flushing function before calling stack trampolines.
+diff -urN gcc-15.2.0/gcc/config/mips/mips-tables.opt gcc-15.2.0-lexra/gcc/config/mips/mips-tables.opt
+--- a/gcc/config/mips/mips-tables.opt	2025-08-08 08:51:40.580349907 +0200
++++ b/gcc/config/mips/mips-tables.opt	2026-04-16 21:11:19.617373415 +0200
+@@ -711,3 +711,12 @@
+ EnumValue
+ Enum(mips_arch_opt_value) String(p6600) Value(107) Canonical
+ 
++
++EnumValue
++Enum(mips_arch_opt_value) String(lx4380) Value(108) Canonical
++
++EnumValue
++Enum(mips_arch_opt_value) String(lx5280) Value(109) Canonical
++
++EnumValue
++Enum(mips_arch_opt_value) String(lx5380) Value(110) Canonical

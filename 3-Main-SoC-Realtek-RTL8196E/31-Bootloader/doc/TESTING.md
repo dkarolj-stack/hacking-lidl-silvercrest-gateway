@@ -285,7 +285,7 @@ After each flash with `AUTOBURN 1`, the bootloader sends a UDP packet
 nc -u -l -p 9999
 
 # Terminal 2: send firmware
-tftp -m binary 192.168.1.6 -c put kernel.img
+tftp -m binary 192.168.1.6 -c put kernel-6.18.img
 ```
 
 Terminal 1 should display `OK` after the flash completes.

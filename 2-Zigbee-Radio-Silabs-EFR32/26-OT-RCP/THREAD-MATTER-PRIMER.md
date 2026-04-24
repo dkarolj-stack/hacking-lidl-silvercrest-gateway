@@ -104,8 +104,8 @@ runs on the Docker host in the OTBR container.
      ┌───────────┼───────────┐
      │  Lidl Gateway (RCP)   │
      │  ┌────────┴────────┐  │
-     │  │  serialgateway   │  │
-     │  │  (TCP ↔ UART)    │  │
+     │  │  kernel UART     │  │
+     │  │  bridge (TCP↔UART)│ │
      │  └────────┬────────┘  │
      │  ┌────────┴────────┐  │
      │  │  EFR32 Radio     │  │  ← Only this: send/receive 802.15.4 frames
@@ -198,7 +198,7 @@ Here's the full picture of every component and its role:
 | Component | Role | Zigbee Equivalent |
 |-----------|------|-------------------|
 | **EFR32 (RCP)** | 802.15.4 radio transceiver | Same (RCP radio) |
-| **serialgateway** | UART-to-TCP bridge | Same |
+| **rtl8196e-uart-bridge** | In-kernel UART-to-TCP bridge | Same |
 | **OTBR** | Thread border router + mesh routing | Zigbee coordinator |
 | **Matter Server** | Fabric controller, device registry | Zigbee2MQTT |
 | **Home Assistant** | Dashboard, automations | Home Assistant |
@@ -216,7 +216,7 @@ IKEA TIMMERFLOTTE
 EFR32 (RCP radio)
   │  UART (Spinel/HDLC)
   ▼
-serialgateway
+rtl8196e-uart-bridge (kernel)
   │  TCP :8888
   ▼
 OTBR (Thread → IPv6)
@@ -237,7 +237,7 @@ Xiaomi LYWSD03MMC
 EFR32 (RCP radio)
   │  UART (Spinel/HDLC)
   ▼
-serialgateway
+rtl8196e-uart-bridge (kernel)
   │  TCP :8888
   ▼
 Zigbee2MQTT (zigbee-on-host)

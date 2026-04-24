@@ -66,7 +66,7 @@ else
                 echo "  bootloader Build bootloader"
                 echo "  kernel     Build Linux kernel"
                 echo "  rootfs     Build rootfs components (BusyBox, Dropbear)"
-                echo "  userdata   Build userdata components (boothold)"
+                echo "  userdata   Build userdata components (boothold, nano, otbr-agent+ot-ctl)"
                 echo ""
                 echo "Examples:"
                 echo "  $0                     # Build all"
@@ -117,7 +117,8 @@ STEP=0
 TOTAL=$((BUILD_BOOTLOADER + BUILD_KERNEL))
 # Rootfs has 2 component builds (busybox + dropbear)
 [ $BUILD_ROOTFS -eq 1 ] && TOTAL=$((TOTAL + 2))
-# Userdata has 1 component build (boothold)
+# Userdata delegates to build_userdata.sh --components-only
+# (boothold + nano + otbr-agent + ot-ctl)
 [ $BUILD_USERDATA -eq 1 ] && TOTAL=$((TOTAL + 1))
 
 # Build bootloader
@@ -151,19 +152,23 @@ if [ $BUILD_USERDATA -eq 1 ]; then
     STEP=$((STEP + 1))
     echo ""
     echo "========================================="
-    echo "  ${STEP}/${TOTAL} BUILDING BOOTHOLD"
+    echo "  ${STEP}/${TOTAL} BUILDING USERDATA COMPONENTS"
     echo "========================================="
-    cd "${SCRIPT_DIR}/34-Userdata/boothold" && ./build_boothold.sh
+    cd "${SCRIPT_DIR}/34-Userdata" && ./build_userdata.sh --components-only
 fi
 
 # Build kernel
+# NOTE: we pass `clean` so the kernel is always rebuilt from scratch against
+# the current toolchain. `make` incremental is toolchain-unaware and would
+# silently reuse stale .o files after a toolchain rebuild. Developers who
+# want incremental builds should call 32-Kernel/build_kernel.sh directly.
 if [ $BUILD_KERNEL -eq 1 ]; then
     STEP=$((STEP + 1))
     echo ""
     echo "========================================="
     echo "  ${STEP}/${TOTAL} BUILDING KERNEL"
     echo "========================================="
-    cd "${SCRIPT_DIR}/32-Kernel" && ./build_kernel.sh
+    cd "${SCRIPT_DIR}/32-Kernel" && ./build_kernel.sh clean
 fi
 
 echo ""
@@ -173,9 +178,9 @@ echo "========================================="
 echo ""
 echo "Built:"
 [ $BUILD_BOOTLOADER -eq 1 ] && ls -lh "${SCRIPT_DIR}/31-Bootloader/boot.bin" 2>/dev/null || true
-[ $BUILD_KERNEL -eq 1 ] && ls -lh "${SCRIPT_DIR}/32-Kernel/kernel.img" 2>/dev/null || true
+[ $BUILD_KERNEL -eq 1 ] && ls -lh "${SCRIPT_DIR}/32-Kernel/kernel-6.18.img" 2>/dev/null || true
 [ $BUILD_ROOTFS -eq 1 ] && echo "  rootfs components: busybox, dropbear → skeleton/bin/"
-[ $BUILD_USERDATA -eq 1 ] && echo "  userdata components: boothold → skeleton/usr/bin/"
+[ $BUILD_USERDATA -eq 1 ] && echo "  userdata components: boothold, nano, otbr-agent, ot-ctl → skeleton/usr/bin/"
 cd "$PROJECT_ROOT"
 echo ""
 echo "rootfs.bin and userdata.bin are built on the fly by the flash scripts."

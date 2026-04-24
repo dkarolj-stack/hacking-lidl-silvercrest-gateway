@@ -1,16 +1,17 @@
 #!/bin/sh
-# build_otbr.sh — Build OpenThread Border Router (POSIX) with Lexra toolchain (musl 1.2.5) for RTL8196E
+# build_otbr.sh — Build OpenThread Border Router (POSIX) with Lexra toolchain for RTL8196E
 #
 # ot-br-posix: OpenThread Border Router POSIX implementation
 # Source: https://github.com/openthread/ot-br-posix
 # License: BSD-3-Clause
 #
 # Usage:
-#   ./build_otbr.sh [branch/tag]
+#   ./build_otbr.sh [branch/tag/commit]
 #
 # Examples:
-#   ./build_otbr.sh              # Default (main branch)
-#   ./build_otbr.sh thread-reference-20230706
+#   ./build_otbr.sh              # Default (pinned commit below)
+#   ./build_otbr.sh main         # Latest development branch
+#   ./build_otbr.sh thread-reference-20250612  # Official release tag
 #
 # Note: This is a complex project with many dependencies. This script is meant
 # for experimentation and may require adjustments based on your needs.
@@ -19,12 +20,21 @@
 
 set -e
 
+ORIG_DIR="$(pwd)"
+trap 'cd "$ORIG_DIR"' EXIT
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # Project root is 4 levels up: ot-br-posix -> 34-Userdata -> 3-Main-SoC -> project root
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
-# Parse branch/tag argument
-BRANCH="${1:-main}"
+# Pinned commit for reproducible builds.
+# This is thread-reference-20250612 + 327 commits (main as of 2026-04-11).
+# Compatible with Home Assistant 2026.3+ (python-otbr-api >= 2.9.0).
+# PascalCase REST patch ensures backward compat with older HA versions.
+# To update: check https://github.com/openthread/ot-br-posix/releases
+#            or test with: ./build_otbr.sh main
+OTBR_DEFAULT="111e78d03b3ffcc115c9df60239b809bb1acda7d"  # 2026-04-09
+BRANCH="${1:-$OTBR_DEFAULT}"
 SOURCE_DIR="${SCRIPT_DIR}/ot-br-posix"
 BUILD_DIR="${SCRIPT_DIR}/build"
 
@@ -32,20 +42,21 @@ echo "========================================="
 echo "  BUILDING OT-BR-POSIX"
 echo "========================================="
 echo ""
-echo "Branch/Tag: ${BRANCH}"
+echo "Branch/Tag/Commit: ${BRANCH}"
 echo ""
 
 # Clone or update repository
-# Note: We don't use --depth 1 for submodules because they reference specific commits
+# Note: We don't use --depth 1 because we may checkout a specific commit SHA
 if [ ! -d "$SOURCE_DIR" ]; then
     echo "==> Cloning ot-br-posix repository..."
-    git clone --branch "$BRANCH" https://github.com/openthread/ot-br-posix.git "$SOURCE_DIR"
+    git clone --single-branch https://github.com/openthread/ot-br-posix.git "$SOURCE_DIR"
     cd "$SOURCE_DIR"
+    git checkout "$BRANCH"
     git submodule update --init --recursive
 else
     echo "==> Source directory exists, updating..."
     cd "$SOURCE_DIR"
-    git fetch origin "$BRANCH"
+    git fetch origin
     git checkout "$BRANCH"
     git submodule update --init --recursive
 fi
@@ -209,23 +220,27 @@ echo "==> Stripping binaries..."
 ${STRIP} src/agent/otbr-agent
 ${STRIP} third_party/openthread/repo/src/posix/ot-ctl
 
+# Install to skeleton
+INSTALL_DIR="${SCRIPT_DIR}/../skeleton/usr/bin"
+mkdir -p "$INSTALL_DIR"
+cp src/agent/otbr-agent "$INSTALL_DIR/"
+cp third_party/openthread/repo/src/posix/ot-ctl "$INSTALL_DIR/"
+chmod +x "$INSTALL_DIR/otbr-agent" "$INSTALL_DIR/ot-ctl"
+
 echo ""
 echo "========================================="
 echo "  BUILD COMPLETE"
 echo "========================================="
 echo ""
 echo "  Binaries:"
-ls -lh src/agent/otbr-agent third_party/openthread/repo/src/posix/ot-ctl
+ls -lh "$INSTALL_DIR/otbr-agent" "$INSTALL_DIR/ot-ctl"
 echo ""
 echo "  Features enabled:"
 echo "    - Border Agent (Thread commissioning)"
 echo "    - mDNS/DNS-SD (OpenThread built-in)"
 echo "    - SRP Advertising Proxy"
 echo "    - DNS-SD Discovery Proxy"
-echo "    - Border Routing
-    - Channel Manager / Monitor"
+echo "    - Border Routing"
+echo "    - Channel Manager / Monitor"
 echo ""
-echo "To install on gateway:"
-echo "  cat build/src/agent/otbr-agent | ssh root@GATEWAY_IP:8888 'cat > /userdata/usr/bin/otbr-agent && chmod +x /userdata/usr/bin/otbr-agent'"
-echo "  cat build/third_party/openthread/repo/src/posix/ot-ctl | ssh root@GATEWAY_IP:8888 'cat > /userdata/usr/bin/ot-ctl && chmod +x /userdata/usr/bin/ot-ctl'"
-echo ""
+echo "✅ otbr-agent and ot-ctl installed in $INSTALL_DIR"
