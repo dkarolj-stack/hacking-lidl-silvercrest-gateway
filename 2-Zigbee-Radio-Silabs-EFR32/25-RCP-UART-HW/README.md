@@ -2,12 +2,24 @@
 
 Radio Co-Processor (RCP) firmware for the EFR32MG1B232F256GM48 chip found in the Lidl Silvercrest Smart Home Gateway.
 
-This firmware transforms the gateway's Zigbee chip into a **Radio Co-Processor** that handles only the 802.15.4 PHY/MAC layer. The protocol stack runs on the host side, enabling two usage modes:
+This firmware transforms the gateway's Zigbee chip into a **Radio Co-Processor**
+that handles only the 802.15.4 PHY/MAC layer. The Zigbee stack runs host-side
+in `zigbeed`, which lets us pair a Series 1 EFR32MG1B radio with a modern
+**EmberZNet 8.2.2** stack — the gateway then exposes **EZSP v18** to Z2M / ZHA,
+even though Silabs froze on-chip Series 1 support at EmberZNet 7.5.1.
 
-| Mode | Stack | Host | Details |
-|------|-------|------|---------|
-| **Zigbee (cpcd + zigbeed)** | EmberZNet | External PC/RPi via the in-kernel UART bridge | See [Host Software Setup](#host-software-setup) |
-| **Thread (OTBR)** | OpenThread | Natively on the RTL8196E gateway | See [`3-Main-SoC.../34-Userdata/ot-br-posix/`](../../3-Main-SoC-Realtek-RTL8196E/34-Userdata/ot-br-posix/README.md) |
+| Host stack | Exposes | When to use |
+|------------|---------|-------------|
+| `cpcd` + `zigbeed` **8.2.2** (recommended) | EZSP v18 | Default — modern stack, latest Z2M/ZHA features |
+| `cpcd` + `zigbeed` **7.5.1** (legacy) | EZSP v13 | Only if you need bit-for-bit parity with the NCP-UART-HW path |
+
+> **Single-stack only.** This RCP firmware does **not** support running Zigbee
+> and Thread concurrently on this gateway — the EFR32MG1B is Silabs Series 1
+> and supports only Dynamic Multiprotocol (BLE + one 15.4 stack), not the
+> Concurrent Multiprotocol needed for Zigbee+Thread. See
+> [`docker/cpcd-zigbeed-otbr/README.md`](./docker/cpcd-zigbeed-otbr/README.md)
+> for the full post-mortem. For Thread / Matter, reflash with the OT-RCP
+> firmware in [`26-OT-RCP/`](../26-OT-RCP/README.md).
 
 ## About RCP Architecture
 
@@ -35,8 +47,8 @@ Unlike standalone firmware (like the Router), an RCP delegates the entire Zigbee
 |--------|----------------------|---------------------|
 | Stack location | On EFR32 (limited RAM) | On host (unlimited resources) |
 | Protocol | EZSP (binary) | CPC (multiplexed) |
-| Multiprotocol | No | Yes (Zigbee + Thread) |
-| Stack updates | Requires reflash | Just update zigbeed |
+| Stack version | Locked to 7.5.1 (EZSP v13) | 7.5.1 *or* 8.2.2 (EZSP v13 / v18) |
+| Stack updates | Requires reflashing the EFR32 | Swap `zigbeed` on the host, EFR32 untouched |
 | Network size | Limited by EFR32 RAM | Host memory is the limit |
 
 ## Hardware
@@ -327,7 +339,7 @@ The CPC protocol is sensitive to network conditions. For reliable operation:
 - **RTL8196E Boot Delay:** 1-second delay for host UART initialization
 - **Hardware Flow Control:** RTS/CTS required for reliable TCP operation
 - **CPC Security Disabled:** Saves ~45KB flash (not needed for local network)
-- **Multiprotocol Ready:** Can run Zigbee + OpenThread simultaneously
+- **Stack flexibility:** Same `.gbl` works with `zigbeed` 7.5.1 *or* 8.2.2 — no EFR32 reflash needed to change EZSP version
 
 ---
 
@@ -364,7 +376,7 @@ The CPC protocol is sensitive to network conditions. For reliable operation:
 ## References
 
 - [CPC Daemon](https://github.com/SiliconLabs/cpc-daemon)
-- [AN1333: Multiprotocol RCP](https://www.silabs.com/documents/public/application-notes/an1333-concurrent-protocols-with-802-15-4-rcp.pdf)
+- [`EMBERZNET-8.x-GUIDE.md`](./EMBERZNET-8.x-GUIDE.md) — how a Series 1 EFR32MG1B ends up exposing EZSP v18 via host-side `zigbeed`
 - [rtl8196e-uart-bridge](https://github.com/jnilo1/hacking-lidl-silvercrest-gateway/tree/main/3-Main-SoC-Realtek-RTL8196E/32-Kernel/files-6.18/drivers/net/rtl8196e-uart-bridge)
 
 ## License

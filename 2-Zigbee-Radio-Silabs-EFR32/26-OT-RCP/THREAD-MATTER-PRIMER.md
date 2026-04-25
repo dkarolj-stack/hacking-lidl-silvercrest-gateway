@@ -140,6 +140,15 @@ Thread, Wi-Fi, and Ethernet.
 | **Interoperability** | Vendor-specific profiles | Mandatory certification |
 | **Updates** | Vendor-dependent | OTA built into spec |
 
+> **On this gateway: Matter-over-Thread only.** The EFR32MG1B is the radio,
+> so Thread is the natural transport. The RTL8196E has Wi-Fi hardware but
+> no Matter implementation runs there — the Matter SDK
+> ([`connectedhomeip`](https://github.com/project-chip/connectedhomeip)) Linux
+> samples want ~150 MB RAM and ~30 MB of binary, well beyond this SoC's
+> 32 MB / 12 MB userdata budget. The gateway's role is a Thread radio
+> frontend, not a Matter hub — for Matter-over-Wi-Fi devices on your LAN,
+> use a real hub (Apple Home, Google Nest, Home Assistant on a Pi/x86).
+
 ### Key Matter Concepts
 
 **Fabric**

@@ -28,7 +28,7 @@ docker run -it --rm -v $(pwd)/..:/workspace lidl-gateway-builder \
 | [22-Backup-Flash-Restore](./22-Backup-Flash-Restore/README.md) | Backup, flash, and restore the Zigbee chip firmware |
 | [23-Bootloader-UART-Xmodem](./23-Bootloader-UART-Xmodem/README.md) | Flash firmware via UART using Gecko bootloader |
 | [24-NCP-UART-HW](./24-NCP-UART-HW/README.md) | NCP firmware for Zigbee2MQTT and ZHA |
-| [25-RCP-UART-HW](./25-RCP-UART-HW/README.md) | RCP firmware with cpcd + zigbeed for multiprotocol support |
+| [25-RCP-UART-HW](./25-RCP-UART-HW/README.md) | RCP firmware: EmberZNet 8.2.2 / EZSP v18 via host-side `zigbeed` |
 | [26-OT-RCP](./26-OT-RCP/README.md) | OpenThread RCP firmware for zigbee-on-host or Thread/Matter |
 | [27-Router](./27-Router/README.md) | Zigbee 3.0 Router SoC firmware to extend mesh network |
 
@@ -46,15 +46,17 @@ Two RCP options are available:
 
 - Uses Silicon Labs' CPC protocol (Co-Processor Communication)
 - Runs with cpcd + zigbeed on the host
-- Native multiprotocol support (Zigbee + Thread simultaneously)
-- Proprietary but well-supported by Silicon Labs
+- Modern stack on Series 1 hardware: **EmberZNet 8.2.2 / EZSP v18** (zigbeed runs host-side, so the EFR32MG1B is no longer the bottleneck)
+- Single-stack only — Zigbee+Thread concurrently is not supported on this gateway (Series 1 has no Concurrent Multiprotocol; reflash with OT-RCP for Thread/Matter)
 
-### OpenThread RCP with zigbee-on-host (26-OT-RCP)
+### OpenThread RCP (26-OT-RCP)
 
-- Standard OpenThread RCP firmware
-- Works with [zigbee-on-host](https://github.com/Nerivec/zigbee-on-host) (fully open-source)
-- Integrated in Zigbee2MQTT 2.x as the `zoh` adapter
-- Simpler setup, community-driven development
+- Standard OpenThread RCP firmware (Spinel/HDLC, fully open-source)
+- **One firmware, three use cases:**
+  - **ZoH** — Zigbee on host via [zigbee-on-host](https://github.com/Nerivec/zigbee-on-host), integrated in Zigbee2MQTT 2.x as the `zoh` adapter
+  - **OTBR on host** — Thread / Matter-over-Thread, OTBR running on an external PC/Pi
+  - **OTBR on gateway** — Thread / Matter-over-Thread, OTBR running natively on the RTL8196E
+- Same `.gbl`, you switch use case by changing what runs host-side — no EFR32 reflash
 
 ## Firmware: Router (SoC)
 

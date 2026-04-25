@@ -4,10 +4,15 @@
 # Flow (v3.0+, requires kernel 6.18 with rtl8196e-uart-bridge):
 #   1. Presents a menu to select the firmware type (NCP, RCP, OT-RCP, Router)
 #   2. Ensures universal-silabs-flasher is available (installs in venv if needed)
-#   3. SSHes into the gateway to stop radio daemons (otbr-agent, cpcd, zigbeed)
-#      and switch the in-kernel UART bridge to flash mode (flow_control=0).
-#      The bridge stays armed on TCP:8888 throughout — no process juggling.
-#   4. Flashes the selected firmware over socket://GW:8888
+#   3. SSHes into the gateway to detect mode (Zigbee vs OTBR via radio.conf):
+#      - Zigbee: bridge already armed by S50uart_bridge; drop flow_control=0.
+#      - OTBR  : bridge intentionally disarmed (otbr-agent owns ttyS1). Stop
+#                S70otbr cleanly, self-arm the bridge at the OT-RCP baud
+#                with flow_control=1 (Spinel/HDLC at 460800 needs RTS/CTS).
+#      Then stop radio daemons; the bridge stays armed on TCP:8888 throughout.
+#   4. Flashes the selected firmware over socket://GW:8888. When USF
+#      transitions the EFR32 into the Gecko Bootloader, drop flow_control
+#      to 0 (Gecko prefers XON/XOFF) and switch baud to 115200.
 #   5. Restores flow_control=1 and reboots the gateway
 #
 # Kernel bridge sysfs (5 writable params, all under /sys/module/
@@ -183,19 +188,54 @@ for i in $(seq 1 "$SSH_RETRIES"); do
             echo 'error no-bridge'
             exit 0
         fi
-        if [ \"\$(cat '$BRIDGE_SYSFS/armed' 2>/dev/null)\" != '1' ]; then
+
+        # Mode is the source of truth for who owns ttyS1:
+        #   Zigbee : S50uart_bridge arms the bridge at boot
+        #   OTBR   : S50 skips, otbr-agent (started by S70otbr) holds ttyS1
+        # In OTBR the bridge stays disarmed by design — we self-arm here so
+        # the flash can run without the user manually wrestling with init
+        # scripts (issue #86).
+        MODE=zigbee
+        BRIDGE_BAUD_CFG=
+        if [ -f /userdata/etc/radio.conf ]; then
+            grep -q '^MODE=otbr' /userdata/etc/radio.conf && MODE=otbr
+            BRIDGE_BAUD_CFG=\$(grep '^BRIDGE_BAUD=' /userdata/etc/radio.conf | cut -d= -f2)
+        fi
+
+        ARMED=\$(cat '$BRIDGE_SYSFS/armed' 2>/dev/null || echo 0)
+
+        if [ \"\$ARMED\" != '1' ]; then
+            if [ \"\$MODE\" = 'otbr' ]; then
+                # Stop S70otbr cleanly: the init script's stop case handles
+                # the LED + 30-s sync daemon trap and final dataset flush
+                # to /userdata/thread, which a bare killall otbr-agent skips.
+                /userdata/etc/init.d/S70otbr stop >/dev/null 2>&1 || \
+                    killall otbr-agent 2>/dev/null
+                sleep 1
+                # Arm the bridge at the OT-RCP firmware's baud, with HW flow
+                # control on — Spinel/HDLC at 460800 needs RTS/CTS to probe
+                # reliably. flow_control gets dropped to 0 only when USF
+                # transitions the EFR32 into the Gecko Bootloader.
+                BAUD=\${BRIDGE_BAUD_CFG:-460800}
+                echo \"\$BAUD\" > '$BRIDGE_SYSFS/baud'
+                echo 1 > '$BRIDGE_SYSFS/flow_control'
+                echo 1 > '$BRIDGE_SYSFS/enable'
+                sleep 1
+                if [ \"\$(cat '$BRIDGE_SYSFS/armed' 2>/dev/null)\" != '1' ]; then
+                    echo 'error self-arm-failed'
+                    exit 0
+                fi
+                echo \"otbr \$BAUD self-armed\"
+                exit 0
+            fi
             echo 'error not-armed'
             exit 0
         fi
 
-        # Infer mode from radio.conf (persistent), then read baud from the
-        # bridge itself — authoritative for what the EFR32 currently sees.
+        # Already armed (Zigbee path): read current baud — authoritative for
+        # what the EFR32 currently sees.
         BAUD=\$(cat '$BRIDGE_SYSFS/baud' 2>/dev/null || echo 115200)
-        if grep -q '^MODE=otbr' /userdata/etc/radio.conf 2>/dev/null; then
-            echo \"otbr \${BAUD}\"
-        else
-            echo \"zigbee \${BAUD}\"
-        fi
+        echo \"\$MODE \$BAUD\"
     " 2>/dev/null); then
         break
     fi
@@ -218,30 +258,67 @@ case "$DETECT_OUT" in
         echo "  echo 1 > ${BRIDGE_SYSFS}/enable" >&2
         exit 1
         ;;
+    "error self-arm-failed")
+        echo "Error: failed to self-arm the bridge on ${GW_IP} (OTBR mode)." >&2
+        echo "Check that S70otbr stopped cleanly; or arm manually:" >&2
+        echo "  /userdata/etc/init.d/S70otbr stop" >&2
+        echo "  echo 460800 > ${BRIDGE_SYSFS}/baud" >&2
+        echo "  echo 1     > ${BRIDGE_SYSFS}/flow_control" >&2
+        echo "  echo 1     > ${BRIDGE_SYSFS}/enable" >&2
+        exit 1
+        ;;
+esac
+
+# Detect whether we self-armed (OTBR path) so we can tell the user.
+SELF_ARMED=
+case "$DETECT_OUT" in
+    *" self-armed")
+        SELF_ARMED=1
+        DETECT_OUT="${DETECT_OUT% self-armed}"
+        ;;
 esac
 
 RADIO_MODE="${DETECT_OUT%% *}"
 CURRENT_BAUD="${DETECT_OUT##* }"
 CURRENT_BAUD="${CURRENT_BAUD:-115200}"
 RADIO_MODE="${RADIO_MODE:-zigbee}"
-echo "Detected: ${RADIO_MODE} @ ${CURRENT_BAUD} baud (bridge armed)"
+if [ -n "$SELF_ARMED" ]; then
+    echo "Detected: ${RADIO_MODE} @ ${CURRENT_BAUD} baud (bridge self-armed; S70otbr stopped)"
+else
+    echo "Detected: ${RADIO_MODE} @ ${CURRENT_BAUD} baud (bridge armed)"
+fi
 
 # Remember the original baud so we can restore it at cleanup (in case the
 # flash fails halfway — the bridge would otherwise be left at 115200 and
 # any zigbeed/otbr-agent trying to restart would talk at the wrong speed).
 ORIG_BAUD="$CURRENT_BAUD"
 
-# Switch bridge to flash mode: stop daemons, disable RTS/CTS.
+# Switch bridge to flash mode: stop daemons, optionally disable RTS/CTS.
 # The bridge stays armed — TCP:8888 never drops.
-echo "Switching bridge to flash mode (flow_control=0)..."
+#
+# Flow control policy:
+#   Zigbee path (NCP/RCP): drop flow_control=0 right away. EZSP/CPC probes
+#     succeed without RTS/CTS at the application baud, and Gecko Bootloader
+#     prefers no HW flow control once we transition there.
+#   OTBR path (Spinel/HDLC): keep flow_control=1 during the probe — at
+#     460800 the EFR32 OT-RCP firmware demands RTS/CTS, dropping it loses
+#     the probe response. flow_control=0 is set lower down, only after USF
+#     has put the EFR32 into Gecko Bootloader.
+if [ "$RADIO_MODE" = "otbr" ]; then
+    echo "Switching bridge to flash mode (flow_control=1, OTBR path)..."
+else
+    echo "Switching bridge to flash mode (flow_control=0)..."
+fi
 $SSH "
     killall otbr-agent 2>/dev/null || true
     killall cpcd 2>/dev/null || true
     killall zigbeed 2>/dev/null || true
     # Stop LED PWM timer (interferes with UART during Xmodem transfer)
     echo 0 > /sys/class/leds/status/brightness 2>/dev/null || true
-    # Disable hardware flow control — Gecko Bootloader uses XON/XOFF.
-    echo 0 > ${BRIDGE_SYSFS}/flow_control
+    if [ '${RADIO_MODE}' != 'otbr' ]; then
+        # Disable hardware flow control — Gecko Bootloader uses XON/XOFF.
+        echo 0 > ${BRIDGE_SYSFS}/flow_control
+    fi
     sleep 1
 "
 
@@ -260,7 +337,11 @@ if ! wait_for_port "$GW_IP" "$GW_PORT"; then
     echo "Error: bridge not reachable on ${GW_IP}:${GW_PORT}." >&2
     exit 1
 fi
-echo "Bridge ready at ${CURRENT_BAUD} baud, flow_control=0."
+if [ "$RADIO_MODE" = "otbr" ]; then
+    echo "Bridge ready at ${CURRENT_BAUD} baud, flow_control=1 (OTBR path)."
+else
+    echo "Bridge ready at ${CURRENT_BAUD} baud, flow_control=0."
+fi
 echo ""
 
 # --- 3. Flash ---------------------------------------------------------------
@@ -324,9 +405,11 @@ else
     # Normal firmware flash: targeted probe at detected baud.
     # --probe-methods avoids USF's full default scan (~30s) and targets
     # the expected protocol based on radio.conf (~1-3s).
-    if [ "$CURRENT_BAUD" = "460800" ] && [ "$RADIO_MODE" = "otbr" ]; then
-        # OT-RCP → Spinel only
-        PROBE="spinel:460800"
+    if [ "$RADIO_MODE" = "otbr" ]; then
+        # OT-RCP → Spinel only. Use CURRENT_BAUD (not hardcoded 460800):
+        # a 2.1.6 migration may run OT-RCP at 115200 or any other baud,
+        # and we self-armed at the radio.conf-derived value.
+        PROBE="spinel:${CURRENT_BAUD}"
     else
         # NCP (EZSP) or RCP (CPC) — try both + bootloader
         PROBE="ezsp:${CURRENT_BAUD},cpc:${CURRENT_BAUD},bootloader:${CURRENT_BAUD}"
@@ -339,11 +422,14 @@ else
     elif grep -q "FailedToEnterBootloaderError" "$FLASH_LOG"; then
         # USF detected the firmware and sent enter_bootloader, but the EFR32
         # is now in Gecko Bootloader mode at 115200 while the bridge is
-        # still at the application baud. Change bridge baud to 115200.
+        # still at the application baud. Switch bridge to 115200 + drop
+        # flow_control to 0 (Gecko prefers XON/XOFF; the OTBR path also
+        # arrives here with flow_control=1 from the probe phase).
         rm -f "$FLASH_LOG"
         echo ""
         echo "Firmware detected — EFR32 entered bootloader. Switching bridge to 115200..."
         set_bridge_baud 115200
+        $SSH "echo 0 > ${BRIDGE_SYSFS}/flow_control" 2>/dev/null || true
         if ! "$FLASHER" --device "socket://${GW_IP}:${GW_PORT}" \
                 --probe-methods "bootloader:115200" \
                 flash --firmware "$FIRMWARE"; then
@@ -360,8 +446,10 @@ else
 
         RECOVERED=false
         for BAUD in 115200 460800 892857 691200 230400; do
-            # Skip the baud we already tried
-            [ "$BAUD" = "$CURRENT_BAUD" ] && continue
+            # Don't skip CURRENT_BAUD: the targeted probe may have failed for
+            # non-baud reasons (e.g. wrong MODE in radio.conf → wrong
+            # --probe-methods set), and the comprehensive scan-baud probe
+            # (ezsp+spinel+cpc) catches those at the same baud.
 
             echo "  Trying ${BAUD} baud..."
             set_bridge_baud "$BAUD"
@@ -403,6 +491,9 @@ else
                 echo ""
                 echo "Switching bridge to 115200 for Gecko Bootloader..."
                 set_bridge_baud 115200
+                # Same rationale as the targeted-probe path: drop flow_control
+                # for Gecko Bootloader regardless of the probe-phase setting.
+                $SSH "echo 0 > ${BRIDGE_SYSFS}/flow_control" 2>/dev/null || true
 
                 echo "Flashing via Gecko Bootloader..."
                 if "$FLASHER" --device "socket://${GW_IP}:${GW_PORT}" \
@@ -419,7 +510,7 @@ else
             echo "Flash failed."
             echo ""
             echo "Could not detect firmware at any known baud rate"
-            echo "(tried: ${CURRENT_BAUD}, 115200, 460800, 892857, 691200, 230400)."
+            echo "(tried: 115200, 460800, 892857, 691200, 230400)."
             echo "You may need a J-Link/SWD debugger to recover."
             exit 1
         fi

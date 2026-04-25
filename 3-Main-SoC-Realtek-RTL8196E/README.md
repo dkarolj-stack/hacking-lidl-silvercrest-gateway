@@ -226,6 +226,34 @@ The setting is applied automatically at every boot. The `S50uart_bridge` init
 script (Zigbee mode) and `otbr-agent` (Thread mode) read the mode automatically
 when they turn the STATUS LED on.
 
+#### 8. Radio / UART bridge (`/userdata/etc/radio.conf`)
+
+`flash_efr32.sh` keeps `MODE=` and `BRIDGE_BAUD=` in sync with the firmware
+flashed on the EFR32, so most users never need to touch this file. Edit it
+manually only to change the bind address, or to tune the baud rate without
+reflashing the radio.
+
+| Key | Values | Default | Read by |
+|-----|--------|---------|---------|
+| `MODE` | `zigbee`, `otbr` | `zigbee` | `S50uart_bridge`, `S70otbr` |
+| `BRIDGE_BAUD` | `460800`, `691200`, `892857` | `460800` | `S50uart_bridge` |
+| `BRIDGE_BIND` | `0.0.0.0`, `127.0.0.1` | `0.0.0.0` | `S50uart_bridge` |
+
+`BRIDGE_BIND=127.0.0.1` restricts the Zigbee TCP bridge to loopback so it can
+only be reached through an SSH tunnel — see
+[`drivers/net/rtl8196e-uart-bridge/SECURITY.md`](./32-Kernel/files-6.18/drivers/net/rtl8196e-uart-bridge/SECURITY.md)
+for the rationale and the tunnel recipe.
+
+`BRIDGE_BAUD` must match the baud configured on the EFR32 side. Higher rates
+(691200, 892857) are validated but require an EFR32 firmware built for that
+baud — `flash_efr32.sh` is the supported way to change it.
+
+Apply changes without rebooting:
+```bash
+/userdata/etc/init.d/S50uart_bridge restart   # Zigbee mode
+/userdata/etc/init.d/S70otbr        restart   # Thread mode
+```
+
 ### Connect to Zigbee2MQTT
 
 In your Zigbee2MQTT configuration:

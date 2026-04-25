@@ -118,6 +118,7 @@ Matter Devices                        Docker Host
 **Gateway setup:** flash userdata in **Zigbee** mode (the in-kernel UART
 bridge forwards the radio to TCP; OTBR runs on the host).
 **Quick start:** see [`docker/README.md` — Use Case 2](docker/README.md#use-case-2-otbr-on-host--threadmatter-docker).
+**Operating the network:** see [`OT-CTL-CHEATSHEET.md`](./OT-CTL-CHEATSHEET.md) for channel, TX power, dataset, and commissioning commands.
 
 ### Use case 3: OTBR on Gateway (v2.0+)
 
@@ -146,6 +147,7 @@ Matter Devices                                       Docker Host
 
 This is the **recommended setup** for Thread/Matter since v2.0.
 **Quick start:** see [`docker/README.md` — Use Case 3](docker/README.md#use-case-3-otbr-on-gateway--threadmatter-native-v20).
+**Operating the network:** see [`OT-CTL-CHEATSHEET.md`](./OT-CTL-CHEATSHEET.md) — includes a section on the project-specific tmpfs/flash dataset sync done by `S70otbr`.
 
 ---
 

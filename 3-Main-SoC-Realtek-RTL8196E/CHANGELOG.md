@@ -6,6 +6,34 @@ rootfs (33-), and userdata (34-).
 
 ---
 
+## [3.0.1] - 2026-04-25
+
+Point release fixing `flash_efr32.sh` recovery paths reported on day 1
+of v3.0.0 (GH discussion #86, @olivluca). No kernel/rootfs/bootloader
+change.
+
+### `flash_efr32.sh`
+
+- **Self-arm bridge in `MODE=otbr`** (commit `ebd4199`): script now
+  stops `S70otbr`, arms the bridge at `BRIDGE_BAUD=` (default 460800),
+  keeps `flow_control=1` for the Spinel probe, drops it to 0 only when
+  USF enters the Gecko Bootloader.
+- **Targeted probe uses `RADIO_MODE` only**, not baud-AND-mode — Spinel
+  is picked whenever `MODE=otbr`, at whatever `CURRENT_BAUD` was
+  self-armed. Fixes 2.1.6 → 3.0 migration where `BRIDGE_BAUD=` is
+  missing.
+- **Scan-baud no longer skips `CURRENT_BAUD`** — handles the case where
+  the targeted probe failed for protocol reasons (wrong `MODE`), not
+  baud reasons. End-to-end validated on a deliberate RCP→OT-RCP flash
+  with `MODE=otbr` mismatch.
+
+### Documentation
+
+- `34-Userdata/README.md` § 8 documents `/userdata/etc/radio.conf`
+  (`MODE=`, `BRIDGE_BAUD=`, `BRIDGE_BIND=`).
+
+---
+
 ## [3.0.0]
 
 Platform-level overhaul: single kernel line, UART↔TCP bridge moves
