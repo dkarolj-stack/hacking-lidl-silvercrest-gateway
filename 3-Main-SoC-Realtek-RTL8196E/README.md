@@ -228,25 +228,44 @@ when they turn the STATUS LED on.
 
 #### 8. Radio / UART bridge (`/userdata/etc/radio.conf`)
 
-`flash_efr32.sh` keeps `MODE=` and `BRIDGE_BAUD=` in sync with the firmware
-flashed on the EFR32, so most users never need to touch this file. Edit it
-manually only to change the bind address, or to tune the baud rate without
-reflashing the radio.
+`flash_efr32.sh` keeps the chip-side identity (`FIRMWARE`,
+`FIRMWARE_VERSION`, `FIRMWARE_BAUD`) and the daemon-routing keys
+(`MODE`, `BRIDGE_BAUD`, `OTBR_BAUD`) in sync with the firmware flashed
+on the EFR32, so most users never need to touch this file. Edit it
+manually only to:
+- change the bind address (`BRIDGE_BIND`)
+- switch an OT-RCP chip between Zigbee bridge mode (cases 1 & 2) and
+  Thread mode (case 3) without reflashing — see
+  [`2-Zigbee-Radio-Silabs-EFR32/26-OT-RCP/docker/README.md`](../2-Zigbee-Radio-Silabs-EFR32/26-OT-RCP/docker/README.md#switching-radio-mode-no-efr32-reflash-needed)
 
-| Key | Values | Default | Read by |
-|-----|--------|---------|---------|
-| `MODE` | `zigbee`, `otbr` | `zigbee` | `S50uart_bridge`, `S70otbr` |
-| `BRIDGE_BAUD` | `460800`, `691200`, `892857` | `460800` | `S50uart_bridge` |
-| `BRIDGE_BIND` | `0.0.0.0`, `127.0.0.1` | `0.0.0.0` | `S50uart_bridge` |
+| Key | Values | Default | Written by | Read by |
+|-----|--------|---------|------------|---------|
+| `FIRMWARE` | `ncp`, `rcp`, `otrcp`, `router` | (absent) | `flash_efr32.sh` (v3.2+) | docs / diagnostics |
+| `FIRMWARE_VERSION` | e.g. `7.5.1` (NCP, Router only) | (absent) | `flash_efr32.sh` (v3.2+) | docs / diagnostics |
+| `FIRMWARE_BAUD` | `115200`, `230400`, `460800`, `691200`, `892857` | (absent) | `flash_efr32.sh` (v3.2+) | docs / diagnostics |
+| `BOOTLOADER_VERSION` | e.g. `2.4.2` | (absent) | `flash_efr32.sh` (v3.2+) — every flash | docs / diagnostics |
+| `MODE` | `otbr` (or absent) | absent = Zigbee | `flash_efr32.sh` | `S50uart_bridge`, `S70otbr` |
+| `BRIDGE_BAUD` | `115200`, `230400`, `460800`, `691200`, `892857` | `460800` | `flash_efr32.sh` (Zigbee) | `S50uart_bridge` |
+| `OTBR_BAUD` | `115200`, `230400`, `460800`, `691200`, `892857` | `460800` | `flash_efr32.sh` (OTBR) | `S70otbr` (v3.1+) |
+| `BRIDGE_BIND` | `0.0.0.0`, `127.0.0.1` | `0.0.0.0` | (manual) | `S50uart_bridge` |
 
-`BRIDGE_BIND=127.0.0.1` restricts the Zigbee TCP bridge to loopback so it can
-only be reached through an SSH tunnel — see
+The `FIRMWARE*` informational keys let `cat /userdata/etc/radio.conf`
+tell you exactly what's on the chip without an
+`universal-silabs-flasher probe`. Full reference + the rationale for
+why there is no `FIRMWARE=bootloader` value:
+[`34-Userdata/README.md`](./34-Userdata/README.md#radioconf-keys-full-reference).
+
+`BRIDGE_BIND=127.0.0.1` restricts the Zigbee TCP bridge to loopback so it
+can only be reached through an SSH tunnel — see
 [`drivers/net/rtl8196e-uart-bridge/SECURITY.md`](./32-Kernel/files-6.18/drivers/net/rtl8196e-uart-bridge/SECURITY.md)
 for the rationale and the tunnel recipe.
 
-`BRIDGE_BAUD` must match the baud configured on the EFR32 side. Higher rates
-(691200, 892857) are validated but require an EFR32 firmware built for that
-baud — `flash_efr32.sh` is the supported way to change it.
+`BRIDGE_BAUD` must match the baud the EFR32 firmware was built at.
+**`flash_efr32.sh` handles this automatically** since v3.1: when you flash
+e.g. `ncp 460800`, the script writes `BRIDGE_BAUD=460800`. Per-firmware
+supported baud sets (NCP 5 values, RCP 3 POSIX-only values, OT-RCP 460800
+only, Router 115200 only) are documented in
+[`2-Zigbee-Radio-Silabs-EFR32/README.md`](../2-Zigbee-Radio-Silabs-EFR32/README.md#gateway-side-runtime-configuration).
 
 Apply changes without rebooting:
 ```bash

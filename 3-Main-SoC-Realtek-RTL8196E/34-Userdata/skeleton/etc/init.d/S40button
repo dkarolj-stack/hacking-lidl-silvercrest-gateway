@@ -1,0 +1,131 @@
+#!/bin/sh
+#
+# S40button — front-panel button handler (long-press → recover EFR32 radio)
+#
+# Hardware:
+#   - Button is wired to RTL8196E GPIO 9 (port B, bit 1) of the
+#     PABCDDAT_REG data register at 0x18003500 + 0x0C.
+#   - Active LOW: bit reads 0 when pressed, 1 when released. No external
+#     pull-up needed (the line is naturally pulled HIGH when idle).
+#   - Originally Tuya's pairing/factory-reset key. Detection logic is
+#     dormant in our v3.0.x firmware — this script wakes it up for v3.1+.
+#
+# Behaviour:
+#   - At boot: switch GPIO 9 from peripheral mode to GPIO input
+#     (clear bit 9 of CNR at 0x18003500, ensure bit 9 of DIR is 0).
+#   - Background poll every 100 ms. Detect press (DATA bit 9 = 0).
+#   - 5 s sustained hold → invoke /usr/sbin/recover_efr32 (resets the
+#     EFR32 radio without rebooting the SoC).
+#   - Status LED gets a subtle blink during the hold for user feedback.
+#   - Short presses (< 5 s) are ignored — leaves room for future bindings
+#     (e.g. factory reset, pairing trigger) without retraining users.
+#
+# See 2-Zigbee-Radio-Silabs-EFR32/POST-MORTEM-bootloader-recovery.md.
+
+GPIO_BASE=0x18003500
+CNR=$((GPIO_BASE + 0x00))
+DIR=$((GPIO_BASE + 0x08))
+DATA=$((GPIO_BASE + 0x0C))
+BUTTON_BIT=9
+BUTTON_MASK=$((1 << BUTTON_BIT))
+
+LED_PATH=/sys/class/leds/status/brightness
+LONG_PRESS_S=5
+POLL_MS=100
+PIDFILE=/var/run/S40button.pid
+
+configure_gpio() {
+    # Clear bit 9 of CNR → switch GPIO 9 from peripheral to GPIO mode
+    cnr=$(devmem $CNR 32)
+    new_cnr=$(printf "0x%08X" $((cnr & ~BUTTON_MASK & 0xFFFFFFFF)))
+    devmem $CNR 32 $new_cnr
+    # Clear bit 9 of DIR → input
+    dir=$(devmem $DIR 32)
+    new_dir=$(printf "0x%08X" $((dir & ~BUTTON_MASK & 0xFFFFFFFF)))
+    devmem $DIR 32 $new_dir
+}
+
+led_save() {
+    [ -w "$LED_PATH" ] && cat "$LED_PATH" 2>/dev/null
+}
+
+led_set() {
+    [ -w "$LED_PATH" ] && echo "$1" > "$LED_PATH" 2>/dev/null
+}
+
+button_pressed() {
+    # active LOW: pressed = bit 9 reads 0
+    d=$(devmem $DATA 32)
+    [ $((d & BUTTON_MASK)) -eq 0 ]
+}
+
+# The poll loop. Runs forever in background as PID stored in PIDFILE.
+poll_loop() {
+    saved_led=$(led_save)
+    while :; do
+        if button_pressed; then
+            held_ms=0
+            # Subtle blink: alternate between current brightness and dim
+            blink_state=0
+            while button_pressed; do
+                # Toggle LED every ~500 ms while held, for visual feedback
+                if [ $((held_ms % 500)) -eq 0 ]; then
+                    if [ $blink_state -eq 0 ]; then
+                        led_set 30
+                        blink_state=1
+                    else
+                        led_set 255
+                        blink_state=0
+                    fi
+                fi
+                # Trigger at LONG_PRESS_S
+                if [ $held_ms -ge $((LONG_PRESS_S * 1000)) ]; then
+                    led_set 0
+                    sleep 0.2
+                    led_set 255
+                    logger -t S40button "long-press detected, invoking recover_efr32"
+                    /usr/sbin/recover_efr32 -q
+                    # Wait for release before re-arming, so a continued
+                    # press doesn't fire repeatedly.
+                    while button_pressed; do
+                        sleep 0.2
+                    done
+                    break
+                fi
+                sleep 0.1
+                held_ms=$((held_ms + 100))
+            done
+            # Restore LED to its prior state on release
+            [ -n "$saved_led" ] && led_set "$saved_led"
+        fi
+        sleep 0.1
+    done
+}
+
+start() {
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+        echo "S40button: already running (pid $(cat $PIDFILE))"
+        return 0
+    fi
+    echo "S40button: configuring GPIO 9 as input..."
+    configure_gpio
+    echo "S40button: starting poll loop (long-press ${LONG_PRESS_S}s -> recover_efr32)..."
+    poll_loop &
+    echo $! > "$PIDFILE"
+}
+
+stop() {
+    if [ -f "$PIDFILE" ]; then
+        pid=$(cat "$PIDFILE")
+        kill "$pid" 2>/dev/null
+        rm -f "$PIDFILE"
+        echo "S40button: stopped (pid $pid)"
+    fi
+}
+
+case "$1" in
+    start) start ;;
+    stop) stop ;;
+    restart) stop; sleep 0.5; start ;;
+    *) echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac

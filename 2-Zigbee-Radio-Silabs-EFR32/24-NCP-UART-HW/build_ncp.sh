@@ -9,14 +9,17 @@
 #   - GECKO_SDK environment variable set
 #
 # Usage:
-#   ./build_ncp.sh           # Build firmware
-#   ./build_ncp.sh clean     # Clean build directory
+#   ./build_ncp.sh                  # Build firmware at default baud (115200)
+#   ./build_ncp.sh 460800           # Build firmware at 460800 baud
+#   ./build_ncp.sh 921600           # Power user: any baud (warning if untested)
+#   ./build_ncp.sh clean            # Clean build directory
+#   ./build_ncp.sh --help           # Show this help
 #
 # Output:
-#   firmware/ncp-uart-hw.gbl  (ready to flash via UART/Xmodem)
-#   firmware/ncp-uart-hw.s37  (for J-Link/SWD flashing)
+#   firmware/ncp-uart-hw-<EmberVersion>-<BAUD>.gbl  (ready to flash via UART)
+#   firmware/ncp-uart-hw-<EmberVersion>-<BAUD>.s37  (for J-Link/SWD flashing)
 #
-# J. Nilo - December 2025
+# J. Nilo - December 2025; baud parameter added April 2026
 
 set -e
 
@@ -32,17 +35,51 @@ SILABS_TOOLS_DIR="${PROJECT_ROOT}/silabs-tools"
 # Target chip
 TARGET_DEVICE="EFR32MG1B232F256GM48"
 
-# Handle clean command
-if [ "${1:-}" = "clean" ]; then
-    echo "Cleaning build directory..."
-    rm -rf "${BUILD_DIR}"
-    echo "Done."
-    exit 0
+# Default baud — historical NCP default. Override via positional arg.
+DEFAULT_BAUD=115200
+TESTED_BAUDS="115200 230400 460800 691200 892857"
+
+# Handle clean / help / baud argument
+case "${1:-}" in
+    clean)
+        echo "Cleaning build directory..."
+        rm -rf "${BUILD_DIR}"
+        echo "Done."
+        exit 0
+        ;;
+    --help|-h)
+        sed -n '2,15p' "$0"
+        echo
+        echo "Tested bauds: ${TESTED_BAUDS}"
+        echo "Default baud: ${DEFAULT_BAUD}"
+        exit 0
+        ;;
+    "")
+        BAUD=${DEFAULT_BAUD}
+        ;;
+    *)
+        BAUD="$1"
+        ;;
+esac
+
+# Validate baud — must be numeric; warn if outside the tested set.
+if ! echo "${BAUD}" | grep -qE '^[0-9]+$'; then
+    echo "Error: invalid baud '${BAUD}' (must be a positive integer)" >&2
+    echo "Tested bauds: ${TESTED_BAUDS}" >&2
+    exit 1
 fi
+case " ${TESTED_BAUDS} " in
+    *" ${BAUD} "*) ;;
+    *)
+        echo "WARNING: baud ${BAUD} is outside the tested set {${TESTED_BAUDS}}."
+        echo "         Build will proceed but the result is not validated."
+        ;;
+esac
 
 echo "========================================="
 echo "  NCP-UART-HW Firmware Builder"
 echo "  Target: ${TARGET_DEVICE}"
+echo "  Baud:   ${BAUD}"
 echo "========================================="
 echo ""
 
@@ -154,7 +191,9 @@ echo ""
 echo "[3/4] Applying configuration..."
 cp "${PATCHES_DIR}/sl_iostream_usart_vcom_config.h" config/
 cp "${PATCHES_DIR}/sl_rail_util_pti_config.h" config/
-echo "  - Copied UART and PTI config from patches"
+# Substitute the requested baud into the UART config header
+sed -i "s|^#define SL_IOSTREAM_USART_VCOM_BAUDRATE.*|#define SL_IOSTREAM_USART_VCOM_BAUDRATE              ${BAUD}|" config/sl_iostream_usart_vcom_config.h
+echo "  - Copied UART and PTI config from patches (baud=${BAUD})"
 
 echo "  Patching Makefile..."
 ARM_GCC_DIR=$(dirname $(dirname $(which arm-none-eabi-gcc)))
@@ -195,9 +234,11 @@ echo "Copying output files..."
 mkdir -p "${OUTPUT_DIR}"
 
 SRC_BASE="build/debug/ncp-uart-hw"
-OUT_BASE="ncp-uart-hw-${EMBERZNET_VERSION}"
+OUT_BASE="ncp-uart-hw-${EMBERZNET_VERSION}-${BAUD}"
 
-rm -f "${OUTPUT_DIR}"/*.s37 "${OUTPUT_DIR}"/*.gbl "${OUTPUT_DIR}"/*.hex "${OUTPUT_DIR}"/*.bin 2>/dev/null
+# Only remove the specific files we're about to rewrite — preserve other baud
+# variants in firmware/ (the matrix lives here side-by-side).
+rm -f "${OUTPUT_DIR}/${OUT_BASE}".{s37,gbl,hex,bin} 2>/dev/null
 
 # Copy .s37 for J-Link flashing
 cp "${SRC_BASE}.s37" "${OUTPUT_DIR}/${OUT_BASE}.s37"
@@ -219,6 +260,7 @@ echo "  BUILD COMPLETE"
 echo "========================================="
 echo ""
 echo "EmberZNet version: ${EMBERZNET_VERSION}"
+echo "UART baud:         ${BAUD}"
 echo ""
 echo "Firmware size:"
 arm-none-eabi-size "${SRC_BASE}.out"

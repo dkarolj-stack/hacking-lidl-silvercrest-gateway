@@ -51,6 +51,59 @@ Environment variables for non-interactive use:
 NET_MODE=static RADIO_MODE=zigbee ./flash_install_rtl8196e.sh -y
 ```
 
+#### Pre-v3.0 → v3.x : non-default radio configurations
+
+The upgrade preserves `/userdata/etc/radio.conf` if it exists. When it
+**doesn't** exist (the v2.x default — pre-v3.0 firmware shipped
+`serialgateway` and didn't use this file), the script auto-seeds the
+v2.x default state in the new userdata:
+
+```
+FIRMWARE=ncp
+FIRMWARE_BAUD=115200
+BRIDGE_BAUD=115200
+```
+
+This is right for the vast majority of v2.x installs (NCP-UART-HW @
+115200 was the v2.x default). **If your v2.x gateway runs a non-default
+firmware** (e.g., OT-RCP for Thread/Matter, or a custom-built NCP at a
+non-default baud), create `/userdata/etc/radio.conf` on the gateway
+**before** running `flash_install_rtl8196e.sh` — the upgrade will pick
+it up via the normal save/restore path and the auto-seed is skipped.
+
+Recipe per v2.x firmware:
+
+```bash
+# OT-RCP @ 115200 (Thread Border Router, v2.x)
+ssh root@192.168.1.88 'cat > /userdata/etc/radio.conf <<EOF
+FIRMWARE=otrcp
+FIRMWARE_BAUD=115200
+MODE=otbr
+OTBR_BAUD=115200
+EOF'
+
+# RCP @ 115200 (Multi-PAN, v2.x)
+ssh root@192.168.1.88 'cat > /userdata/etc/radio.conf <<EOF
+FIRMWARE=rcp
+FIRMWARE_BAUD=115200
+BRIDGE_BAUD=115200
+EOF'
+
+# NCP at a non-default baud you built yourself
+ssh root@192.168.1.88 'cat > /userdata/etc/radio.conf <<EOF
+FIRMWARE=ncp
+FIRMWARE_BAUD=460800
+BRIDGE_BAUD=460800
+EOF'
+```
+
+**v3.0 → v3.x** : `radio.conf` already exists on v3.0 (with at least
+`BRIDGE_BAUD` or `MODE`/`OTBR_BAUD`); it's preserved as-is. The
+chip-identity keys (`FIRMWARE`, `FIRMWARE_VERSION`, `FIRMWARE_BAUD`)
+won't be present until the next `flash_efr32.sh` invocation rewrites
+them. Optional: complete the file by hand to get the chip identity
+visible immediately, using the same recipes above.
+
 ### `build_fullflash.sh` — Build the flash image
 
 Assembles bootloader, kernel, rootfs and userdata into a single verified 16 MiB
@@ -94,27 +147,40 @@ can also be used directly when the gateway is already in bootloader mode.
 
 ### `flash_efr32.sh` — Silabs EFR32 radio (OTA via SSH)
 
-Flashes firmware to the EFR32MG21 Zigbee/Thread radio over the network.
+Flashes firmware to the EFR32MG1B Zigbee/Thread radio over the network.
 The gateway must be running with SSH access (custom firmware already installed).
 
 ```bash
-./flash_efr32.sh [GATEWAY_IP]
+./flash_efr32.sh -y ncp                    # default IP 192.168.1.88
+./flash_efr32.sh -y ncp 460800             # NCP at 460800 baud
+./flash_efr32.sh -y -g 10.0.0.5 otrcp      # custom IP, OT-RCP
+./flash_efr32.sh --help                    # full CLI reference
 ```
 
-The script:
-1. Presents a firmware selection menu
-2. Installs `universal-silabs-flasher` in a venv if needed (auto-reinstalls if probe-methods patch changes)
-3. SSHes into the gateway to stop radio daemons and switch the in-kernel UART bridge to flash mode (`flow_control=0`, retries up to 3 times)
-4. Flashes the selected firmware via EZSP/Xmodem over `socket://IP:8888`
-5. Restores `flow_control=1` and reboots the gateway
+Firmware aliases: `bootloader`, `ncp`, `rcp`, `otrcp`, `router`
+(numeric `1`-`5` also accepted).
 
-| Firmware | Location | Description |
-|----------|----------|-------------|
-| bootloader-uart-xmodem-2.4.2.gbl | `23-Bootloader-UART-Xmodem/firmware/` | Gecko Bootloader stage 2 |
-| ncp-uart-hw-7.5.1.gbl | `24-NCP-UART-HW/firmware/` | Zigbee NCP for zigbee2mqtt / ZHA (EZSP) |
-| rcp-uart-802154.gbl | `25-RCP-UART-HW/firmware/` | Multi-PAN RCP for zigbee2mqtt (EmberZNet 8.x via cpcd) |
-| ot-rcp.gbl | `26-OT-RCP/firmware/` | OpenThread RCP for otbr-agent |
-| z3-router-7.5.1.gbl | `27-Router/firmware/` | Zigbee 3.0 standalone router |
+The script:
+1. Pulses `nRST` (sysfs knob) to start the chip from a known-clean state
+2. Installs `universal-silabs-flasher` in a venv if needed (auto-reinstalls if probe-methods patch changes)
+3. SSHes into the gateway, stops radio daemons, switches the in-kernel UART bridge to flash mode (`flow_control=0`)
+4. Probes the running app (or the Gecko Bootloader if the chip is already there), flashes the selected firmware via EZSP/CPC/Spinel + Xmodem over `socket://IP:8888`
+5. Writes the matching chip identity (`FIRMWARE`, `FIRMWARE_VERSION`, `FIRMWARE_BAUD`) and daemon-routing keys (`MODE`, `BRIDGE_BAUD`/`OTBR_BAUD`) to `/userdata/etc/radio.conf` so init scripts arm correctly on next boot AND a future reader can tell what's on the chip without probing
+6. Reboots the gateway
+
+| Firmware | Location | Description | `radio.conf` after flash |
+|----------|----------|-------------|--------------------------|
+| `bootloader-uart-xmodem-2.4.2.gbl` | `23-Bootloader-UART-Xmodem/firmware/` | Gecko Bootloader stage 2 | unchanged (bootloader update doesn't change the app slot) |
+| `ncp-uart-hw-<EmberVersion>-<BAUD>.gbl` | `24-NCP-UART-HW/firmware/` | Zigbee NCP for Z2M / ZHA (EZSP) | `FIRMWARE=ncp` + `FIRMWARE_VERSION=<v>` + `FIRMWARE_BAUD=<BAUD>` + `BRIDGE_BAUD=<BAUD>` |
+| `rcp-uart-802154-<BAUD>.gbl` | `25-RCP-UART-HW/firmware/` | Multi-PAN RCP for Z2M (EmberZNet 8.x via cpcd) | `FIRMWARE=rcp` + `FIRMWARE_BAUD=<BAUD>` + `BRIDGE_BAUD=<BAUD>` |
+| `ot-rcp-<BAUD>.gbl` | `26-OT-RCP/firmware/` | OpenThread RCP — 3 use cases via `radio.conf` | `FIRMWARE=otrcp` + `FIRMWARE_BAUD=<BAUD>` + `MODE=otbr` + `OTBR_BAUD=<BAUD>` (case 3 default; edit `MODE`/`BRIDGE_BAUD` for cases 1/2) |
+| `z3-router-<EmberVersion>-<BAUD>.gbl` | `27-Router/firmware/` | Zigbee 3.0 standalone router | `FIRMWARE=router` + `FIRMWARE_VERSION=<v>` + `FIRMWARE_BAUD=115200` + `BRIDGE_BAUD=115200` |
+
+> Pre-built GBL filenames embed the EmberZNet version (where applicable) and
+> the UART baud. `flash_efr32.sh` resolves the right file via a glob, so
+> you don't need to track exact filenames after firmware bumps. See
+> [`2-Zigbee-Radio-Silabs-EFR32/README.md`](../../2-Zigbee-Radio-Silabs-EFR32/README.md)
+> for the per-firmware supported baud sets.
 
 ## Prerequisites
 

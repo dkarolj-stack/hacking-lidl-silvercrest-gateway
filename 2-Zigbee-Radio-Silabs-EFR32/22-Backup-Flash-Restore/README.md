@@ -102,14 +102,33 @@ This method uses the in-kernel `rtl8196e-uart-bridge` (6.18 kernel) on the Lidl 
 Use the `flash_efr32.sh` script at the repository root:
 
 ```bash
-./flash_efr32.sh <GATEWAY_IP>
+./flash_efr32.sh -y ncp                    # default IP 192.168.1.88
+./flash_efr32.sh -y ncp 460800             # NCP at non-default baud
+./flash_efr32.sh -y -g 10.0.0.5 otrcp      # custom gateway IP, OT-RCP
+./flash_efr32.sh --help                    # full CLI reference
 ```
 
-The script handles everything automatically: installs `universal-silabs-flasher`
-in a venv, switches the in-kernel UART bridge to flash mode (`flow_control=0`)
-via SSH, flashes the selected firmware, and reboots the gateway.
+Firmware aliases: `bootloader`, `ncp`, `rcp`, `otrcp`, `router` (numeric
+`1`-`5` also accepted). Per-firmware supported bauds are listed in
+[`2-Zigbee-Radio-Silabs-EFR32/README.md`](../README.md#gateway-side-runtime-configuration).
 
-See [35-Migration](../../3-Main-SoC-Realtek-RTL8196E/35-Migration/README.md) for details on the script.
+The script handles everything automatically since v3.1: pulses `nRST`
+for a clean chip state, installs `universal-silabs-flasher` in a venv if
+needed, switches the in-kernel UART bridge to flash mode
+(`flow_control=0`) via SSH, flashes the selected firmware, writes the
+matching chip identity (`FIRMWARE`, `FIRMWARE_VERSION`,
+`FIRMWARE_BAUD`) and daemon-routing keys (`MODE`,
+`BRIDGE_BAUD`/`OTBR_BAUD`) to `/userdata/etc/radio.conf` so init
+scripts arm correctly on next boot AND a future reader can tell what's
+on the chip without probing it, then reboots. See
+[`3-Main-SoC-Realtek-RTL8196E/34-Userdata/README.md`](../../3-Main-SoC-Realtek-RTL8196E/34-Userdata/README.md#radioconf-keys-full-reference)
+for the full key reference.
+
+> **Legacy env-var interface** (deprecated, kept for v3.0.x compat):
+> `FW_CHOICE=2 BAUD_CHOICE=460800 CONFIRM=y ./flash_efr32.sh` still
+> works with a deprecation warning.
+
+See [35-Migration](../../3-Main-SoC-Realtek-RTL8196E/35-Migration/README.md#flash_efr32sh--silabs-efr32-radio-ota-via-ssh) for the per-firmware filename pattern table.
 
 ---
 
@@ -285,7 +304,10 @@ Terminal 2: universal-silabs-flasher ...     (works!)
 ### Flash via UART (most common)
 
 ```bash
-./flash_efr32.sh <GATEWAY_IP>
+./flash_efr32.sh -y ncp                    # NCP @ default baud, default IP
+./flash_efr32.sh -y ncp 460800             # NCP @ 460800
+./flash_efr32.sh -y -g 10.0.0.5 otrcp      # OT-RCP, custom IP
+./flash_efr32.sh --help                    # full CLI reference
 ```
 
 ### Full backup via SWD

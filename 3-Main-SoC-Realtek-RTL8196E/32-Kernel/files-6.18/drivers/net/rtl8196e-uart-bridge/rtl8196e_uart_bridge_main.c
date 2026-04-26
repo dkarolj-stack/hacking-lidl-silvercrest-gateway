@@ -44,6 +44,8 @@
 #include <linux/uio.h>
 #include <linux/string.h>
 #include <linux/leds.h>
+#include <linux/mfd/syscon.h>
+#include <linux/regmap.h>
 #include <net/sock.h>
 #include <net/tcp.h>
 
@@ -86,6 +88,11 @@ static int  rtl_port          = 8888;
 static char rtl_bind[64]      = "0.0.0.0";
 static bool rtl_flow_control  = true;   /* CRTSCTS; 0 during EFR32 flash */
 static bool rtl_enable        = false;
+
+/* nrst_pulse: lazily-initialized syscon regmap for PIN_MUX_SEL_2 access
+ * (looked up via "realtek,rtl819x-sysc" compatible — same syscon the
+ * rtl8196e-eth driver uses). Owned by the kernel, never put. */
+static struct regmap *bridge_syscon;
 
 /* Status LED control: fire an LED trigger when a TCP client is connected,
  * clear it on disconnect. Mirrors the pre-v3.0 serialgateway behaviour
@@ -1099,6 +1106,70 @@ static const struct kernel_param_ops flow_control_ops = {
 	.get = param_get_flow_control,
 };
 
+/*
+ * nrst_pulse: assert the EFR32's nRST line via PIN_MUX_SEL_2 bits {7,10,13},
+ * hold 100 ms, release. Recovers a stuck EFR32 (crashed/livelock app, J-Link
+ * halt, corrupted-app `pc == 0xFFFFFFFF`) without rebooting the SoC.
+ *
+ * Mechanism: PIN_MUX_SEL_2 (sysc + 0x44) bits {7,10,13} = 0x2480 route the
+ * SoC pin connected to the EFR32 nRST line to a function that drives it LOW.
+ * Clearing them releases nRST. Same bits the V2.5 SoC bootloader sees set
+ * by chip default at every reboot — see POST-MORTEM-bootloader-recovery.md
+ * in 2-Zigbee-Radio-Silabs-EFR32/.
+ *
+ * Userspace triggers a pulse with:
+ *   echo 1 > /sys/module/rtl8196e_uart_bridge/parameters/nrst_pulse
+ * The pulse is write-only (no meaningful value to read). The bridge's TCP
+ * connection is not closed — in-flight UART bytes are lost during the reset,
+ * which is expected. The caller (typically the recover_efr32 helper script)
+ * is responsible for stopping the radio daemon (otbr-agent / cpcd / zigbeed)
+ * before triggering, and restarting it after.
+ */
+static int param_set_nrst_pulse(const char *val, const struct kernel_param *kp)
+{
+	bool trigger;
+	int ret;
+
+	ret = kstrtobool(val, &trigger);
+	if (ret)
+		return ret;
+	if (!trigger)
+		return 0;
+
+	mutex_lock(&bridge_lock);
+	if (!bridge_syscon) {
+		bridge_syscon = syscon_regmap_lookup_by_compatible("realtek,rtl819x-sysc");
+		if (IS_ERR(bridge_syscon)) {
+			ret = PTR_ERR(bridge_syscon);
+			bridge_syscon = NULL;
+			mutex_unlock(&bridge_lock);
+			pr_err(DRV_NAME ": nrst_pulse: syscon lookup failed (%d)\n", ret);
+			return ret;
+		}
+	}
+
+	pr_info(DRV_NAME ": nrst_pulse: asserting EFR32 nRST for 100 ms\n");
+	ret = regmap_update_bits(bridge_syscon, 0x44, 0x2480, 0x2480);
+	if (ret) {
+		mutex_unlock(&bridge_lock);
+		pr_err(DRV_NAME ": nrst_pulse: assert failed (%d)\n", ret);
+		return ret;
+	}
+	msleep(100);
+	ret = regmap_update_bits(bridge_syscon, 0x44, 0x2480, 0x0000);
+	mutex_unlock(&bridge_lock);
+	if (ret) {
+		pr_err(DRV_NAME ": nrst_pulse: release failed (%d)\n", ret);
+		return ret;
+	}
+	pr_info(DRV_NAME ": nrst_pulse: EFR32 nRST released, chip rebooting\n");
+	return 0;
+}
+
+static const struct kernel_param_ops nrst_pulse_ops = {
+	.set = param_set_nrst_pulse,
+};
+
 /* Read-only "armed" parameter: actual bridge state (vs. "enable" = intent). */
 static int param_get_armed(char *buffer, const struct kernel_param *kp)
 {
@@ -1148,6 +1219,10 @@ module_param_cb(armed,     &armed_ops,  NULL, 0444);
 MODULE_PARM_DESC(armed,     "Actual bridge state (read-only)");
 module_param_cb(stats,     &stats_ops,  NULL, 0444);
 MODULE_PARM_DESC(stats,     "Live rx/tx/drop counters (read-only)");
+module_param_cb(nrst_pulse, &nrst_pulse_ops, NULL, 0200);
+MODULE_PARM_DESC(nrst_pulse,
+	"Write 1 to assert EFR32 nRST for 100 ms (recovers stuck radio "
+	"without rebooting SoC; see POST-MORTEM-bootloader-recovery.md)");
 module_param_named(status_led_brightness, rtl_status_led_brightness, int, 0644);
 MODULE_PARM_DESC(status_led_brightness,
 	"Brightness 0-255 applied to the '" BRIDGE_LED_TRIG_NAME

@@ -91,16 +91,69 @@ Then restart the network: `/userdata/etc/init.d/S10network restart`
 
 ## Radio Mode
 
-The gateway supports two radio modes, selected at flash time:
+The gateway supports two radio modes, selected at flash time. **Mode is
+controlled by `/userdata/etc/radio.conf`** (managed automatically by
+`flash_efr32.sh` since v3.1):
 
-| Mode | Config | Init script | EFR32 firmware | Use case |
-|------|--------|-------------|----------------|----------|
-| **Zigbee** (default) | no `radio.conf` | `S50uart_bridge` | NCP or RCP+zigbeed | Zigbee2MQTT, ZHA |
-| **Thread** | `MODE=otbr` | `S70otbr` | OT-RCP | Matter, Home Assistant Thread |
+| Mode | `radio.conf` keys | Init script that wakes up | EFR32 firmware | Use case |
+|------|---------|-------------|----------------|----------|
+| **Zigbee** (default) | `BRIDGE_BAUD=<baud>` | `S50uart_bridge` | NCP, RCP, or OT-RCP for ZoH/OTBR-host | Zigbee2MQTT, ZHA, OTBR-on-host |
+| **Thread** | `MODE=otbr` + `OTBR_BAUD=<baud>` | `S70otbr` | OT-RCP | Matter, Home Assistant Thread (OTBR-on-gateway) |
 
-The mode is controlled by `/userdata/etc/radio.conf`. When set to Thread mode, `S50uart_bridge` is skipped and `S70otbr` starts `otbr-agent` instead.
+When `MODE=otbr` is present, `S50uart_bridge` is skipped and `S70otbr`
+starts `otbr-agent` instead. When absent (Zigbee mode), `S50uart_bridge`
+arms the in-kernel UART bridge at `BRIDGE_BAUD`.
 
 See `ot-br-posix/README.md` for Thread-specific documentation.
+
+### radio.conf keys (full reference)
+
+| Key | Values | Default | Written by | Read by |
+|-----|--------|---------|------------|---------|
+| `FIRMWARE` | `ncp`, `rcp`, `otrcp`, `router` | (absent) | `flash_efr32.sh` (v3.2+) | docs / diagnostics |
+| `FIRMWARE_VERSION` | e.g. `7.5.1` (NCP, Router only) | (absent) | `flash_efr32.sh` (v3.2+) | docs / diagnostics |
+| `FIRMWARE_BAUD` | `115200`, `230400`, `460800`, `691200`, `892857` | (absent) | `flash_efr32.sh` (v3.2+) | docs / diagnostics |
+| `BOOTLOADER_VERSION` | e.g. `2.4.2` | (absent) | `flash_efr32.sh` (v3.2+) — every flash | docs / diagnostics |
+| `MODE` | `otbr` (or absent) | (absent = Zigbee) | `flash_efr32.sh` | `S50uart_bridge`, `S70otbr` |
+| `BRIDGE_BAUD` | `115200`, `230400`, `460800`, `691200`, `892857` | `460800` | `flash_efr32.sh` (Zigbee path) | `S50uart_bridge` |
+| `OTBR_BAUD` | `115200`, `230400`, `460800`, `691200`, `892857` | `460800` | `flash_efr32.sh` (OTBR path) | `S70otbr` (v3.1+) |
+| `BRIDGE_BIND` | `0.0.0.0`, `127.0.0.1` | `0.0.0.0` | (manual) | `S50uart_bridge` |
+
+`flash_efr32.sh` writes the right `MODE` and `BRIDGE_BAUD`/`OTBR_BAUD`
+keys based on the firmware you flash — manual editing is only needed
+for advanced cases like OT-RCP in ZoH or OTBR-on-host modes (see
+[`2-Zigbee-Radio-Silabs-EFR32/26-OT-RCP/docker/README.md`](../../2-Zigbee-Radio-Silabs-EFR32/26-OT-RCP/docker/README.md#switching-radio-mode-no-efr32-reflash-needed)).
+
+#### `FIRMWARE` / `FIRMWARE_VERSION` / `FIRMWARE_BAUD` / `BOOTLOADER_VERSION` (v3.2+)
+
+Four informational keys describing what's actually on the EFR32 — both
+the application slot AND the Stage-2 Gecko Bootloader. They let an
+offline reader (or a future migration script) tell exactly what's
+running without probing the chip via `universal-silabs-flasher`.
+
+* `FIRMWARE` — name of the app firmware in the EFR32's application slot:
+  `ncp` | `rcp` | `otrcp` | `router`. **Never `bootloader`** — the
+  Gecko Bootloader is a runtime mode, not an application. A bootloader-
+  only flash leaves this key untouched (the existing app is still the
+  one in the slot).
+* `FIRMWARE_VERSION` — when the GBL filename embeds it (currently NCP
+  and Router carry the EmberZNet version). Absent for RCP and OT-RCP
+  — for those, the meaningful version lives host-side (`zigbeed` for
+  RCP, `ot-br-posix` for OT-RCP).
+* `FIRMWARE_BAUD` — the chip's UART baud as configured at last flash.
+  Source of truth for "what speed does the chip expect"; the
+  operational `BRIDGE_BAUD` / `OTBR_BAUD` should normally match. If
+  they diverge, the host-side daemons can't reach the chip — fix it
+  by re-running `flash_efr32.sh` or by editing `radio.conf` to match.
+* `BOOTLOADER_VERSION` — Gecko Bootloader Stage-2 version (e.g. `2.4.2`)
+  as reported by `universal-silabs-flasher` during the last flash. Both
+  bootloader-only and app flashes refresh this — USF transits the
+  bootloader to upload either kind of GBL, and logs its version on the
+  way through.
+
+If the chip happens to be sitting in the Gecko Bootloader (empty or
+corrupt application slot), `FIRMWARE` may be stale — the actual
+runtime state is detected by `flash_efr32.sh`'s pre-flight probe.
 
 ### Switching Radio Mode
 
@@ -108,35 +161,34 @@ To switch between modes on a running gateway:
 
 **Thread → Zigbee:**
 ```bash
-# 1. Stop otbr-agent
-/userdata/etc/init.d/S70otbr stop
+# Reflash EFR32 with NCP firmware (from your workstation)
+./flash_efr32.sh -y ncp                    # default IP 192.168.1.88
+# or: ./flash_efr32.sh -y -g 10.0.0.5 ncp  # custom IP
 
-# 2. Remove radio.conf (reverts to Zigbee mode)
-rm /userdata/etc/radio.conf
-
-# 3. Reflash EFR32 with NCP firmware (from your workstation)
-./flash_efr32.sh <GATEWAY_IP>
-# Select [2] NCP-UART-HW
-
-# 4. Gateway reboots — in-kernel UART bridge arms automatically via S50uart_bridge
+# That's it. The script stops otbr-agent if running, flashes the new
+# firmware, writes BRIDGE_BAUD=<baud> to /userdata/etc/radio.conf
+# (no MODE= line → S50uart_bridge takes over instead of S70otbr),
+# then reboots.
 ```
 
 **Zigbee → Thread:**
 ```bash
-# 1. Disarm the in-kernel UART bridge (releases /dev/ttyS1 for otbr-agent)
-/userdata/etc/init.d/S50uart_bridge stop
+# Reflash EFR32 with OT-RCP firmware
+./flash_efr32.sh -y otrcp
 
-# 2. Set radio mode to Thread
-echo "MODE=otbr" > /userdata/etc/radio.conf
-
-# 3. Reflash EFR32 with OT-RCP firmware (from your workstation)
-./flash_efr32.sh <GATEWAY_IP>
-# Select [3] RCP-UART-HW
-
-# 4. Gateway reboots — otbr-agent starts automatically
+# That's it. The script stops the bridge daemons, flashes OT-RCP,
+# writes MODE=otbr + OTBR_BAUD=460800 to radio.conf so S70otbr
+# launches otbr-agent on next boot, then reboots.
 ```
 
-Alternatively, reflash userdata with `flash_userdata.sh` which prompts for the radio mode.
+> **Pre-v3.1 manual approach** (still works, no longer needed): edit
+> `radio.conf` by hand before flashing. Since v3.1, `flash_efr32.sh`
+> handles both the chip flash AND the gateway-side `radio.conf` rewrite
+> in one shot.
+
+Alternatively, reflash the entire userdata partition with
+`flash_userdata.sh` — its prompt sets the radio mode at flash time
+(useful for a fresh install).
 
 ## SSH Passwordless Access
 

@@ -134,20 +134,35 @@ echo "Gateway is running Linux at ${LINUX_IP}:${SSH_PORT}."
 
 # --- step 2: verify SSH access + devmem -------------------------------------
 
+# Source hardened SSH helpers (ssh_retry + SSH_HARDEN_OPTS).
+# shellcheck disable=SC1091
+. "${SCRIPT_DIR}/../lib/ssh.sh"
+
 SSH_SOCK="/tmp/remote_flash_ssh_$$"
-SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o ControlMaster=auto -o ControlPath=$SSH_SOCK -o ControlPersist=60 -p $SSH_PORT"
+# StrictHostKeyChecking=no + /dev/null known_hosts is intentional here:
+# this workflow targets gateways that may have just been re-flashed, so
+# host keys churn legitimately. ControlMaster reuses one TCP connection
+# for the back-to-back commands below.
+SSH_OPTS=(
+    "${SSH_HARDEN_OPTS[@]}"
+    -o StrictHostKeyChecking=no
+    -o UserKnownHostsFile=/dev/null
+    -o ControlMaster=auto
+    -o ControlPath="$SSH_SOCK"
+    -o ControlPersist=60
+    -p "$SSH_PORT"
+)
+SSH_TARGET="${SSH_USER}@${LINUX_IP}"
 
 # Verify SSH access (opens ControlMaster connection)
-# shellcheck disable=SC2086
-if ! ssh $SSH_OPTS "${SSH_USER}@${LINUX_IP}" "true" 2>/dev/null; then
+if ! ssh_retry "${SSH_OPTS[@]}" "$SSH_TARGET" "true" 2>/dev/null; then
     echo "Error: SSH authentication failed." >&2
     exit 1
 fi
 
 # This script requires custom firmware with devmem (>= v1.2.1)
 # devmem absent = Tuya or v1.0 firmware — cannot boothold
-# shellcheck disable=SC2086
-if ! ssh $SSH_OPTS "${SSH_USER}@${LINUX_IP}" "command -v devmem" >/dev/null 2>&1; then
+if ! ssh_retry "${SSH_OPTS[@]}" "$SSH_TARGET" "command -v devmem" >/dev/null 2>&1; then
     echo "Error: devmem not found — this firmware does not support boothold." >&2
     echo "For Tuya/first flash, use:  flash_install_rtl8196e.sh" >&2
     exit 1
@@ -166,8 +181,7 @@ if [ "$COMPONENT" = "userdata" ]; then
     SAVE_TAR=$(mktemp)
     # Save only user-configurable files (not init scripts or system files)
     SAVE_FILES="etc/eth0.conf etc/mac_address etc/radio.conf etc/leds.conf etc/passwd etc/TZ etc/hostname etc/dropbear ssh thread"
-    # shellcheck disable=SC2086
-    ssh $SSH_OPTS "${SSH_USER}@${LINUX_IP}" \
+    ssh_retry "${SSH_OPTS[@]}" "$SSH_TARGET" \
         "tar cf - -C /userdata $SAVE_FILES 2>/dev/null" > "$SAVE_TAR" 2>/dev/null || true
 
     if [ -s "$SAVE_TAR" ]; then
@@ -185,11 +199,10 @@ fi
 echo "Sending boothold + reboot..."
 # boothold writes HOLD to DRAM via pwrite+O_SYNC (bypasses write-back cache)
 # BusyBox reboot signals init and returns — SSH session closes cleanly
-# shellcheck disable=SC2086
-ssh $SSH_OPTS "${SSH_USER}@${LINUX_IP}" "boothold && reboot" 2>/dev/null || true
+ssh_retry "${SSH_OPTS[@]}" "$SSH_TARGET" "boothold && reboot" 2>/dev/null || true
 # Close ControlMaster socket — gateway is rebooting, stale connection
 # would interfere with shutdown detection
-ssh -O exit -o ControlPath="$SSH_SOCK" "${SSH_USER}@${LINUX_IP}" 2>/dev/null || true
+ssh -O exit -o ControlPath="$SSH_SOCK" "$SSH_TARGET" 2>/dev/null || true
 
 # --- step 5: wait for bootloader -------------------------------------------
 # Two-phase wait to avoid ARP false positives (Linux responds to ARP for

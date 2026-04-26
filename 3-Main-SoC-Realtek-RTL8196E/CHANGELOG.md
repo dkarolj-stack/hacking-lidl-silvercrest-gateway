@@ -6,6 +6,246 @@ rootfs (33-), and userdata (34-).
 
 ---
 
+## [3.1.0] - 2026-04-26
+
+EFR32 radio recovery and a rock-solid `flash_efr32.sh`. The kernel
+gains a write-only sysfs knob to chip-reset the EFR32 without touching
+the SoC; userland gets a mode-aware recovery helper and a long-press
+front-panel button handler that wires it all together. The companion
+flash script is rewritten with proper CLI ergonomics, hardened SSH,
+and ~120 lines of scan-baud heuristics removed (the kernel pulse
+makes them obsolete). The `etc/version` component table is also
+refreshed to reflect what v3.0 actually shipped.
+
+### Kernel — `nrst_pulse` sysfs knob in `rtl8196e-uart-bridge`
+
+- Write-only kernel param at
+  `/sys/module/rtl8196e_uart_bridge/parameters/nrst_pulse`: writing
+  `1` asserts the EFR32 `nRST` line via `PIN_MUX_SEL_2` bits {7,10,13}
+  (sysc reg 0x44, mask 0x2480), holds 100 ms, releases. Recovers a
+  stuck EFR32 (crashed app, J-Link halt, `pc==0xFFFFFFFF`) without
+  rebooting the SoC.
+- Implementation uses `syscon_regmap_lookup_by_compatible()` against
+  `"realtek,rtl819x-sysc"` (same syscon used by `rtl8196e-eth`),
+  looked up lazily on first pulse. Pulse is taken under `bridge_lock`,
+  in-flight UART bytes during the reset are lost (expected).
+
+### Userdata — front-panel button + recovery helper
+
+- `skeleton/usr/sbin/recover_efr32` (new) — mode-aware. Reads
+  `/userdata/etc/radio.conf`, stops the matching radio daemon
+  (`S70otbr` for `MODE=otbr`, otherwise leaves `S50uart_bridge` up),
+  pulses `nrst_pulse`, restarts the daemon. `-q` for quiet mode.
+- `skeleton/etc/init.d/S40button` (new) — long-press handler on the
+  front-panel button, GPIO 9 (port B bit 1, active LOW) — confirmed
+  empirically on the v3.0 board. Holding ≥ 5 s invokes
+  `recover_efr32 -q`; shorter presses ignored.
+- `skeleton/etc/init.d/S70otbr` — `RCP_URL` now reads `OTBR_BAUD=`
+  from `/userdata/etc/radio.conf` (default 460800). Lets
+  `flash_efr32.sh otrcp` install a non-default-baud OT-RCP image and
+  have `S70otbr` pick the matching baud on next boot.
+
+### `flash_efr32.sh` — top-to-bottom rewrite
+
+Motivated by a 5-baud NCP loop test that pinned the script for ~17
+min on a stuck `ssh root@gw 'true'` (no `ConnectTimeout`, no
+`ServerAliveInterval`). Parallel goal: real CLI ergonomics — flags,
+`--help`, validation before any SSH.
+
+- **CLI** —
+  `flash_efr32.sh [OPTIONS] FIRMWARE [BAUD]`
+  with positional `FIRMWARE` (`bootloader|ncp|rcp|otrcp|router`,
+  numeric `1..5` also accepted) and optional `BAUD` (defaults
+  per-firmware). Options: `-g/--gateway IP`, `-y/--yes`,
+  `--no-reboot`, `-h/--help`. Env vars `FW_CHOICE` / `BAUD_CHOICE` /
+  `CONFIRM` still honoured for one release with a deprecation warning.
+- **`ssh_gw` wrapper** — every SSH call uses `ConnectTimeout=5`,
+  `ServerAliveInterval=3`, `ServerAliveCountMax=2`, `BatchMode=yes`,
+  three retries with 2 s/4 s backoff on transport failure (`rc=255`).
+  No more silent infinite hangs after a gateway reboot.
+- **Detection rewrite** — remote probe step returns a structured
+  `KEY=VALUE` block (`STATUS`, `MODE`, `ARMED`, `BRIDGE_BAUD`) parsed
+  with `awk`. Probes ALL four protocols (`ezsp+cpc+spinel+bootloader`)
+  at the bridge baud regardless of `RADIO_MODE` — needed for
+  bridge-mode OT-RCP that speaks Spinel under `MODE=zigbee`.
+- **Pre-flight bootloader check** — first probe at bridge=115200 /
+  `flow=0` with `bootloader:115200` covers the "previous flash left
+  the chip in the Gecko Bootloader" case (empty app slot after a
+  fresh bootloader install). Case-insensitive `grep -qi` catches
+  `Detected.*BOOTLOADER` / `bootloader` USF variants.
+- **Drop scan-baud (~120 LOC)** — the kernel `nrst_pulse` knob means
+  the chip is always at the `radio.conf` baud after a pulse. The
+  "stale `radio.conf`" failure path now prints a clear
+  "power-cycle and retry" message instead of looping.
+- **GBL resolution by glob** — `resolve_firmware()` `ls -1t` the
+  `firmware/` dir for the right pattern and picks the most recent
+  match. Removes the EmberZNet SDK lookup — the script now runs on a
+  host without any Silabs tools.
+- **Cleanup is non-rebooting** — `cleanup()` restores bridge state
+  and prints "reboot manually if needed". The gateway reboot only
+  happens at the end of the success path (suppressible with
+  `--no-reboot` for chained flashes).
+- **Z3-Router CLI fallback symmetric** — earlier draft fired the
+  router-specific `bootloader reboot` CLI hack unconditionally when
+  the target was the router, breaking every "non-router → router"
+  path (CLI bytes hit a chip that doesn't speak CLI, bridge ends up
+  at 115200, downstream probe fails). Now the standard probe runs
+  first (so NCP/RCP/OT-RCP/bootloader paths are unaffected) and the
+  CLI fallback fires whenever the standard probe fails — handles
+  both `router → router` AND `router → ncp/rcp/otrcp` migrations
+  (the symmetric case where the chip is already running the router
+  firmware and doesn't speak EZSP/CPC/Spinel/Gecko-BTL at all).
+- **115200 baud fallback** — when the standard probe at the
+  `radio.conf` baud fails, try `ezsp+cpc+spinel+bootloader@115200`
+  before giving up. Covers three real-world cases that the v3.1
+  nrst_pulse-only design didn't handle on its own (because nrst_pulse
+  resets the chip but doesn't change its firmware-baked-in baud):
+  * **Tuya stock NCP** — the original Tuya factory firmware runs at
+    115200; `flash_efr32.sh` can now upgrade straight from a fresh
+    Tuya → custom-Linux install without manually editing `radio.conf`
+    first. Validated end-to-end on hardware: chip detected as `EZSP
+    6.5.0.0 build 188` running on Tuya bootloader `1.8.0`, then
+    cleanly upgraded to NCP 7.5.1 @ 460800 + the new
+    `BOOTLOADER_VERSION=1.8.0` (the Tuya bootloader survives — no
+    Stage 2 reflash needed) recorded in `radio.conf`.
+  * **Stale `radio.conf`** — user manually flashed the EFR32 outside
+    this script (Simplicity Commander / J-Link) or the file carries
+    a value from a previous firmware no longer on the chip.
+  * **Factory state / cold-boot at 115200** — any chip booting at
+    the Gecko default after a reset.
+
+  Skipped when `radio.conf` already says 115200 (the standard probe
+  just tried that, no point re-trying). The 115200 fallback runs
+  before the Z3-Router CLI fallback, so the worst-case slow path is:
+  standard probe (~23 s) → 115200 fallback (~23 s if no match) →
+  router CLI (~8 s) → final error.
+
+End-to-end validated on hardware (Z2M+cpcd-zigbeed back online with
+EmberZNet 8.2.2 / EZSP v18 between every transition):
+
+| Source firmware | Target | Path |
+|---|---|---|
+| RCP @ 460800 | router | standard probe (CPC → BTL) |
+| router | router | CLI fallback |
+| router | NCP @ 460800 | CLI fallback |
+| OT-RCP @ 460800 | router | standard probe (Spinel → BTL) |
+| router | RCP @ 460800 | CLI fallback |
+| NCP @ 460800 | RCP @ 460800 | standard probe (EZSP → BTL) |
+
+Plus the original 5-baud NCP sweep (115200..892857), 3 OT-RCP use
+cases (ZoH, OTBR-host, OTBR-gateway), and chained bootloader→RCP
+flash.
+
+### SSH helpers — `lib/ssh.sh`
+
+The v3.1 ssh-hang fix (the one that turned a 17-min loop test into a
+2-min one) was originally inline in `flash_efr32.sh`. Promoted to a
+sourceable lib so the same hardening protects the other flash
+scripts that talk to the gateway over SSH.
+
+* `lib/ssh.sh` (new) exports:
+  - `SSH_HARDEN_OPTS` (bash array) — `ConnectTimeout=5`,
+    `ServerAliveInterval=3`, `ServerAliveCountMax=2`, `BatchMode=yes`.
+  - `ssh_retry` — `ssh` wrapper that retries only on `rc=255`
+    (transport failure) up to 3 times with 2 s/4 s backoff. Real
+    remote-command exit codes pass through unchanged.
+  - `wait_for_port` — TCP-port-ready poll helper.
+* `flash_efr32.sh`, `flash_remote.sh`, and `flash_install_rtl8196e.sh`
+  all source `lib/ssh.sh`. The latter two had been re-implementing the
+  v3.0-era SSH option string (no `ServerAliveInterval`, no retry on
+  `rc=255`) and shared the v3.1 ssh-hang failure mode unfixed —
+  validated on a real v2.1.2 → v3.1.0 production migration that
+  involved several back-to-back SSH commands plus a mid-session
+  reboot, all of which used to be hang candidates.
+
+### `flash_install_rtl8196e.sh` — v2 → v3 migration
+
+Pre-v3.0 firmware (which ran `serialgateway`) had no
+`/userdata/etc/radio.conf` — the EFR32 baud was hard-coded to 115200
+(NCP-UART-HW @ 115200, the v2.x default). The v3.x in-kernel UART
+bridge defaults to 460800 when `radio.conf` is missing, which left
+v2 → v3 upgrades with the host bridge mismatched against a chip still
+running at 115200. Z2M / ZHA could not reach the coordinator until
+the user manually wrote `radio.conf` or reflashed the EFR32.
+
+`flash_install_rtl8196e.sh` now detects the v2 → v3 case (saved
+`FW_VERSION` major < 3 AND no `radio.conf` in the restored skeleton)
+and pre-seeds the new `userdata.bin` with the known v2.x state:
+
+```
+FIRMWARE=ncp
+FIRMWARE_BAUD=115200
+BRIDGE_BAUD=115200
+```
+
+so the gateway boots into a working state out of the box. Caught on
+the maintainer's prod gateway during a real v2.1.2 → v3.1.0 upgrade.
+
+### `radio.conf` — chip-identity keys
+
+Until now `radio.conf` told you the bridge baud and the daemon stack
+to use, but not which app firmware was on the EFR32. A
+`BRIDGE_BAUD=460800` could mean NCP@460800, RCP@460800, or OT-RCP in
+bridge mode @460800 — only a `universal-silabs-flasher probe` could
+disambiguate. `flash_efr32.sh` now also writes four informational
+keys at every successful flash:
+
+```
+FIRMWARE=ncp             # ncp | rcp | otrcp | router  (CLI alias vocab)
+FIRMWARE_VERSION=7.5.1   # only when GBL filename embeds it (NCP, Router)
+FIRMWARE_BAUD=460800     # the chip's UART baud at flash time
+BOOTLOADER_VERSION=2.4.2 # Gecko Bootloader Stage 2 — refreshed on every flash
+```
+
+There is no `FIRMWARE=bootloader` value: the Gecko Bootloader is a
+runtime mode (chip stuck on empty/corrupt app slot), not an
+application. A bootloader-only flash leaves `FIRMWARE`/`FIRMWARE_BAUD`
+untouched (the existing app stays valid) but DOES update
+`BOOTLOADER_VERSION` (since that's the one piece of state it changed).
+For app flashes, USF transits the bootloader on its way to upload the
+GBL and logs the bootloader version in passing — `flash_efr32.sh`
+parses that line and persists it.
+
+The `flash_install_rtl8196e.sh` v2 → v3 pre-seed (above) writes the
+chip-identity keys describing the known v2.x state; `BOOTLOADER_VERSION`
+is left absent until the next `flash_efr32.sh` invocation populates it.
+
+### `etc/version` — component table refreshed
+
+The component list had been frozen at the v2.x line since the v3.0
+bump. Updated to reflect what v3.0 actually shipped:
+
+| Component | was | now |
+|---|---|---|
+| crosstool-NG | 1.28.0.3_a3fef85 (gcc 8.5.0 + binutils 2.34) | 1.28.0 (gcc 15.2.0 + binutils 2.45.1) |
+| musl | 1.2.5 | 1.2.6 |
+| linux | 5.10.252 | 6.18.24 |
+| busybox | 1.37 | 1.37.0 |
+| dropbear | 2025.89 (incorrect) | 2025.88 |
+| serialgateway | 3.0 | *(removed — replaced by in-kernel uart-bridge)* |
+| otbr-agent | *(absent)* | thread-reference-20250612+ commit 111e78d0 |
+
+### Documentation
+
+- ~24 README files swept for v3.1 reality across two passes: first
+  the new `flash_efr32.sh` CLI / baud-aware GBL filenames / `OTBR_BAUD`
+  key / three OT-RCP deployment patterns (ZoH host, OTBR-in-docker,
+  OTBR-on-gateway); second the new `radio.conf` chip-identity keys
+  (`FIRMWARE`, `FIRMWARE_VERSION`, `FIRMWARE_BAUD`) — canonical full
+  reference in [`34-Userdata/README.md`](34-Userdata/README.md#radioconf-keys-full-reference),
+  per-firmware READMEs link to it instead of duplicating.
+- `2-Zigbee-Radio-Silabs-EFR32/POST-MORTEM-bootloader-recovery.md`
+  (new) — documents why a hardware `nRST` pulse can't enter the Gecko
+  Bootloader on this board (PIN reset always boots the app slot;
+  `BTL_GPIO_ACTIVATION` pin not wired; Tuya stock confirms no
+  hardware recovery), and traces the empirical evidence behind the
+  `nrst_pulse` design.
+- `25-RCP` and `26-OT-RCP` Z2M `configuration.yaml` examples now
+  externalise the device list (`devices: devices.yaml`) like 24-NCP
+  does — keeps personal IEEE addresses out of git.
+
+---
+
 ## [3.0.1] - 2026-04-25
 
 Point release fixing `flash_efr32.sh` recovery paths reported on day 1

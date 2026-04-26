@@ -47,20 +47,51 @@ only needs Matter Server + Home Assistant.
   - Use cases 1 & 2: Zigbee mode (in-kernel UART bridge)
   - Use case 3: Thread mode (otbr-agent)
 
-### Switching Radio Mode (no reflash needed)
+### Switching Radio Mode (no EFR32 reflash needed)
 
-The radio mode is controlled by `/userdata/etc/radio.conf` on the gateway.
-You can switch without reflashing:
+The same `ot-rcp.gbl` runs in all three use cases. What changes is the
+**gateway-side `radio.conf`** state, which controls which init script
+takes ownership of `/dev/ttyS1` at boot:
+
+All three cases share the same chip-side identity in `radio.conf`
+(`FIRMWARE=otrcp` + `FIRMWARE_BAUD=460800`, written by `flash_efr32.sh`);
+what differs is the daemon-routing keys:
+
+| Use case | Daemon-routing keys in `radio.conf` | Init script that wakes up |
+|---|---|---|
+| 1 (ZoH) | `BRIDGE_BAUD=460800` | `S50uart_bridge` arms TCP:8888 |
+| 2 (OTBR host) | `BRIDGE_BAUD=460800` | `S50uart_bridge` arms TCP:8888 |
+| 3 (OTBR gateway) | `MODE=otbr` + `OTBR_BAUD=460800` | `S70otbr` launches otbr-agent |
+
+`flash_efr32.sh -y otrcp` sets the **case 3** state by default
+(`MODE=otbr` + `OTBR_BAUD=460800`). To use case 1 or 2 instead, switch
+the gateway state explicitly after the EFR32 flash:
 
 ```bash
-# Switch to Zigbee mode (use cases 1 & 2)
-ssh root@192.168.1.88 "rm -f /userdata/etc/radio.conf; reboot"
+# Case 1 or 2 — Zigbee bridge mode at the OT-RCP firmware baud (460800)
+ssh root@192.168.1.88 "
+    sed -i '/^MODE=/d;/^OTBR_BAUD=/d;/^BRIDGE_BAUD=/d' /userdata/etc/radio.conf
+    echo 'BRIDGE_BAUD=460800' >> /userdata/etc/radio.conf
+    reboot
+"
 
-# Switch to Thread mode (use case 3)
-ssh root@192.168.1.88 "echo MODE=otbr > /userdata/etc/radio.conf; reboot"
+# Case 3 — Thread mode (this is what flash_efr32.sh -y otrcp does by default)
+ssh root@192.168.1.88 "
+    sed -i '/^MODE=/d;/^OTBR_BAUD=/d;/^BRIDGE_BAUD=/d' /userdata/etc/radio.conf
+    printf 'MODE=otbr\nOTBR_BAUD=460800\n' >> /userdata/etc/radio.conf
+    reboot
+"
 ```
 
-Alternatively, `3-Main-SoC-Realtek-RTL8196E/34-Userdata/flash_userdata.sh` sets the mode at flash time via its prompt.
+> **Why not just `rm -f radio.conf`?** Bare-removing the file leaves the
+> bridge at its compile-time default (115200), which doesn't match the
+> OT-RCP firmware's 460800 baud — Z2M's `zoh` adapter and the OTBR-host
+> docker would then talk to the chip at the wrong speed and fail
+> silently. Always set `BRIDGE_BAUD=460800` explicitly.
+
+Alternatively, `3-Main-SoC-Realtek-RTL8196E/34-Userdata/flash_userdata.sh`
+sets the mode at flash time via its prompt — useful for a fresh userdata
+install.
 
 ### On Your Computer
 
@@ -78,19 +109,35 @@ Runs Zigbee2MQTT with the `zoh` adapter. The Zigbee stack runs on the host
 
 ### Quick Start
 
-1. Edit `z2m/configuration.yaml` — set your gateway IP:
+1. **Flash OT-RCP** firmware on the EFR32:
+   ```bash
+   ./flash_efr32.sh -y otrcp                    # default IP 192.168.1.88
+   # or: ./flash_efr32.sh -y -g 10.0.0.5 otrcp  # custom IP
+   ```
+
+2. **Switch gateway to Zigbee bridge mode** (the script set MODE=otbr by
+   default; case 1 needs BRIDGE_BAUD=460800 instead):
+   ```bash
+   ssh root@192.168.1.88 "
+       sed -i '/^MODE=/d;/^OTBR_BAUD=/d;/^BRIDGE_BAUD=/d' /userdata/etc/radio.conf
+       echo 'BRIDGE_BAUD=460800' >> /userdata/etc/radio.conf
+       reboot
+   "
+   ```
+
+3. **Edit `z2m/configuration.yaml`** — set your gateway IP:
    ```yaml
    serial:
      port: tcp://192.168.1.88:8888
      adapter: zoh
    ```
 
-2. Start:
+4. **Start the docker stack**:
    ```bash
    docker compose -f docker-compose-zoh.yml up -d
    ```
 
-3. Open http://localhost:8080
+5. **Open** http://localhost:8080
 
 ### Files
 
@@ -110,7 +157,27 @@ runs on the host.
 
 ### Quick Start
 
-#### 1. Enable IPv6 Forwarding on the Host
+#### 1. Flash OT-RCP firmware on the EFR32
+
+```bash
+./flash_efr32.sh -y otrcp                    # default IP 192.168.1.88
+# or: ./flash_efr32.sh -y -g 10.0.0.5 otrcp  # custom IP
+```
+
+#### 2. Switch gateway to Zigbee bridge mode
+
+The script set `MODE=otbr` by default (case 3); case 2 needs
+`BRIDGE_BAUD=460800` so OTBR-in-docker can reach the EFR32 over TCP:8888:
+
+```bash
+ssh root@192.168.1.88 "
+    sed -i '/^MODE=/d;/^OTBR_BAUD=/d;/^BRIDGE_BAUD=/d' /userdata/etc/radio.conf
+    echo 'BRIDGE_BAUD=460800' >> /userdata/etc/radio.conf
+    reboot
+"
+```
+
+#### 3. Enable IPv6 Forwarding on the Host
 
 OTBR runs on the host in this use case — the host needs IPv6 forwarding to
 route Thread traffic between the mesh and the local network.
@@ -121,22 +188,22 @@ sudo sysctl -w net.ipv6.conf.all.forwarding=1
 echo "net.ipv6.conf.all.forwarding=1" | sudo tee /etc/sysctl.d/99-thread.conf
 ```
 
-#### 2. Configure
+#### 4. Configure
 
 Edit `docker-compose-otbr-host.yml`:
 ```yaml
 environment:
   - RCP_HOST=192.168.1.88     # ← Your gateway's IP
-  - OTBR_BACKBONE_IF=enp2s0  # ← Your host's Ethernet interface (ip link)
+  - OTBR_BACKBONE_IF=enp2s0   # ← Your host's Ethernet interface (ip link)
 ```
 
-#### 3. Start
+#### 5. Start
 
 ```bash
 docker compose -f docker-compose-otbr-host.yml up -d
 ```
 
-#### 4. Configure Home Assistant
+#### 6. Configure Home Assistant
 
 Open http://localhost:8123, create your account, then add integrations
 (**Settings → Devices & Services → Add Integration**):
@@ -145,7 +212,7 @@ Open http://localhost:8123, create your account, then add integrations
 2. **Thread** — auto-detected after adding OTBR
 3. **Matter** — auto-detects on `localhost:5580` (or manual: `ws://localhost:5580/ws`)
 
-#### 5. Set Thread Network as Preferred
+#### 7. Set Thread Network as Preferred
 
 **Settings → Devices & Services → Thread → Configure** → select your network →
 **"Use as preferred network"**.
@@ -172,10 +239,20 @@ This is the recommended setup for Thread/Matter since v2.0.
 
 ### Quick Start
 
-#### 1. Flash the Gateway in Thread Mode
+#### 1. Flash OT-RCP firmware on the EFR32 (auto-sets Thread mode)
+
+The simplest path — `flash_efr32.sh -y otrcp` flashes the firmware AND
+writes `MODE=otbr` + `OTBR_BAUD=460800` to `radio.conf` so `S70otbr`
+launches `otbr-agent` on next boot:
 
 ```bash
-# Flash userdata — select "Thread" radio mode
+./flash_efr32.sh -y otrcp                    # default IP 192.168.1.88
+# or: ./flash_efr32.sh -y -g 10.0.0.5 otrcp  # custom IP
+```
+
+Alternative for fresh installs (full userdata reflash):
+
+```bash
 cd 3-Main-SoC-Realtek-RTL8196E/34-Userdata
 RADIO_MODE=thread CONFIRM=y ./flash_userdata.sh
 ```

@@ -65,16 +65,54 @@ Unlike standalone firmware (like the Router), an RCP delegates the entire Zigbee
 
 ## Option 1: Flash Pre-built Firmware (Recommended)
 
-Pre-built firmware is available in the `firmware/` directory. From the repository root:
+Pre-built firmware is available in the `firmware/` directory. From the
+repository root:
 
 ```bash
-./flash_efr32.sh <GATEWAY_IP>
-# Select [3] RCP-UART-HW
+./flash_efr32.sh -y rcp                 # default baud 460800, default IP 192.168.1.88
+./flash_efr32.sh -y rcp 230400          # 230400 baud (cpcd POSIX-supported only)
+./flash_efr32.sh -y -g 10.0.0.5 rcp     # custom gateway IP
+./flash_efr32.sh --help                 # full CLI reference
 ```
 
-The script handles everything (switch the in-kernel UART bridge to flash mode, flash, reboot).
+The script handles everything: pulse `nRST` for a clean chip state, switch
+the in-kernel UART bridge to flash mode, run the Xmodem upload, write the
+matching `BRIDGE_BAUD=<baud>` to `/userdata/etc/radio.conf` so the bridge
+arms at the right speed on next boot, then reboot.
 
-Then continue to [Host Software Setup](#host-software-setup) to configure cpcd and zigbeed on your host machine.
+Supported RCP bauds (pre-built GBLs): 115200, 230400, 460800.
+**`cpcd` rejects non-POSIX bauds (691200, 892857), so RCP is capped at
+460800.** For a custom baud (POSIX values only), see
+[Option 2](#option-2-build-from-source) below.
+
+> **Legacy env-var interface** (deprecated, kept for v3.0.x compat):
+> `FW_CHOICE=3 BAUD_CHOICE=460800 CONFIRM=y ./flash_efr32.sh` still works
+> with a deprecation warning. Prefer the flag form above.
+
+### Gateway state after flash
+
+`flash_efr32.sh` writes the matching baud to `/userdata/etc/radio.conf`
+so the gateway-side init scripts arm the bridge correctly on next boot.
+For RCP at baud `<B>`:
+
+```
+FIRMWARE=rcp           # what's in the EFR32 application slot (v3.2+)
+FIRMWARE_BAUD=<B>      # the chip's UART baud (v3.2+)
+BRIDGE_BAUD=<B>        # consumed by S50uart_bridge → arms TCP:8888 at <B>
+                       # (no MODE= line; otbr-agent stays off)
+```
+
+(No `FIRMWARE_VERSION` for RCP — the meaningful EmberZNet version is
+host-side in `zigbeed`, not in the chip firmware.) See
+[`3-Main-SoC-Realtek-RTL8196E/34-Userdata/README.md`](../../3-Main-SoC-Realtek-RTL8196E/34-Userdata/README.md#radioconf-keys-full-reference)
+for the full key reference.
+
+The init script `S50uart_bridge` reads this on boot. `cpcd` on the host
+then connects to `tcp://<gw>:8888` (see [Host Software Setup](#host-software-setup)
+or `docker/docker-compose-zigbee.yml`).
+
+Then continue to [Host Software Setup](#host-software-setup) to configure
+cpcd and zigbeed on your host machine.
 
 ---
 
@@ -101,31 +139,40 @@ This installs:
 
 ```bash
 cd 2-Zigbee-Radio-Silabs-EFR32/25-RCP-UART-HW
-./build_rcp.sh
+./build_rcp.sh                  # default baud 460800
+./build_rcp.sh 230400           # POSIX baud only — cpcd rejects 691200/892857
+./build_rcp.sh --help           # show baud options + defaults
 ```
 
 ### Output
 
+The output filename embeds the chosen baud:
+
 ```
 firmware/
-└── rcp-uart-802154.gbl   # For UART/Xmodem flashing
+├── rcp-uart-802154-115200.gbl
+├── rcp-uart-802154-230400.gbl
+└── rcp-uart-802154-460800.gbl   # default
 ```
+
+`flash_efr32.sh` resolves the right file via a glob.
 
 ### Customization
 
-Edit `patches/rcp-uart-802154.slcp` for SDK configuration, or `patches/sl_cpc_drv_uart_usart_vcom_config.h` for UART settings (pins, baudrate).
+Pin layout (PA0/PA1/PA4/PA5) is in `patches/sl_cpc_drv_uart_usart_vcom_config.h`.
+The build script edits the `BAUDRATE` define automatically based on the
+positional `BAUD` argument — no manual file editing for baud changes.
 
 ### Flash
 
 **Via network (same as Option 1):**
 ```bash
-./flash_efr32.sh <GATEWAY_IP>
-# Select [3] RCP-UART-HW
+./flash_efr32.sh -y rcp 460800     # baud must match what you built above
 ```
 
 **Via J-Link/SWD** (if you have physical access to the SWD pads):
 ```bash
-commander flash firmware/rcp-uart-802154.gbl \
+commander flash firmware/rcp-uart-802154-460800.gbl \
     --device EFR32MG1B232F256GM48
 ```
 
@@ -270,16 +317,20 @@ cat /proc/tty/driver/serial
 
 ### Changing Baudrate
 
-1. Edit `patches/sl_cpc_drv_uart_usart_vcom_config.h` — change
-   `SL_CPC_DRV_UART_VCOM_BAUDRATE`
-2. Rebuild firmware and flash the EFR32
-3. Set the bridge baud on the gateway:
-   `echo <baud> > /sys/module/rtl8196e_uart_bridge/parameters/baud`
-   (persist in `/userdata/etc/radio.conf` via `BRIDGE_BAUD=<baud>`)
-4. Update `UART_BAUDRATE` in `docker-compose-zigbee.yml` (or `cpcd.conf`)
+```bash
+# 1. Build the GBL at the desired baud (POSIX values only for RCP)
+cd 2-Zigbee-Radio-Silabs-EFR32/25-RCP-UART-HW && ./build_rcp.sh 230400
 
-The baud must be a standard POSIX value (115200, 230400, 460800) for
-cpcd to accept it.
+# 2. Flash — radio.conf BRIDGE_BAUD is updated automatically
+./flash_efr32.sh -y rcp 230400
+
+# 3. Update UART_BAUDRATE in docker-compose-zigbee.yml (or cpcd.conf)
+#    so cpcd opens the TCP socket at the matching speed.
+```
+
+The baud must be a standard POSIX value (115200, 230400, 460800) — `cpcd`
+rejects anything else (the build script and the flash script will warn
+but not block, in case you plan to use a non-cpcd consumer).
 
 ---
 

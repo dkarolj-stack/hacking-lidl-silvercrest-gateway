@@ -4,6 +4,125 @@ All notable changes to the EFR32 firmware and tooling are documented here.
 
 ---
 
+## [3.1.0] - 2026-04-26
+
+Build matrix and documentation pass. Each per-firmware `build_*.sh`
+script now takes the UART baud as a positional argument and emits
+baud-aware filenames so multiple bauds can coexist in `firmware/`. A
+new top-level `make-all-bauds.sh` builds the full matrix in one run.
+Pre-built artefacts ship for every supported baud point so users
+without a Silabs toolchain can flash any combination directly. The
+companion `flash_efr32.sh` (top-level, see
+`../3-Main-SoC-Realtek-RTL8196E/CHANGELOG.md` for the full refactor
+notes) resolves the right `.gbl` via a glob — no more EmberZNet SDK
+lookup.
+
+### Build matrix
+
+- Per-firmware build scripts (`build_ncp.sh`, `build_rcp.sh`,
+  `build_ot_rcp.sh`, `build_router.sh`) take an optional positional
+  baud:
+  ```
+  ./build_ncp.sh                # default per-firmware baud
+  ./build_ncp.sh 460800         # explicit override
+  ```
+- Output `.gbl` / `.s37` filenames embed the baud:
+  ```
+  ncp-uart-hw-7.5.1-<baud>.gbl
+  rcp-uart-802154-<baud>.gbl
+  ot-rcp-<baud>.gbl
+  z3-router-7.5.1-<baud>.gbl
+  ```
+- New `make-all-bauds.sh` wrapper builds all variants in one run
+  (NCP×5, RCP×3, OT-RCP×1, Router×1), idempotent (skips files that
+  already exist), with `--force` and `--list` options.
+
+### Pre-built firmware shipped
+
+| Firmware | Baud points |
+|---|---|
+| NCP-UART-HW (7.5.1) | 115200 / 230400 / 460800 / 691200 / 892857 |
+| RCP-UART-HW | 115200 / 230400 / 460800 *(cpcd POSIX baud ceiling)* |
+| OT-RCP | 460800 *(matches OpenThread default)* |
+| Z3 Router (7.5.1) | 115200 *(no UART data path)* |
+
+End-to-end validated on hardware against Z2M (NCP & RCP), the ZoH
+adapter (OT-RCP bridge mode), `otbr-agent` in Docker, and on-gateway
+`otbr-agent`.
+
+### `firmware/` directory cleanup
+
+Two batches of dead weight removed from the per-firmware `firmware/`
+directories:
+
+* **Unshipped `.s37` artefacts** — every per-firmware build emits
+  both `.gbl` (UART/OTA path) and `.s37` (J-Link/SWD path), but only
+  the *combined-bootloader* `.s37` is end-to-end useful for users
+  (the one-shot J-Link image to install Stage 1 + Stage 2 on a virgin
+  chip). Dropped 15 orphan `.s37` files (~1.4 MiB) from `23-`, `24-`,
+  `25-`, `26-`, `27-` and tightened `.gitignore` so future builds
+  don't re-introduce them. Kept:
+  `23-Bootloader-UART-Xmodem/firmware/bootloader-uart-xmodem-2.4.2-combined.s37`.
+
+* **Pre-v3.0 manual-flash legacy in `24-NCP-UART-HW/firmware/`** —
+  the directory still carried `flash_ezsp{7,8,13}.sh` plus a MIPS
+  `sx` xmodem-send binary (~166 KiB) from the pre-v3.0 workflow
+  (scp the script to the gateway, push the `.gbl` over `sx` on the
+  serial line). Replaced end-to-end by the repo-root `flash_efr32.sh`
+  driving `universal-silabs-flasher` over the in-kernel UART bridge —
+  these scripts have been unreachable from the docs since v3.0.
+  Removed.
+
+### `POST-MORTEM-bootloader-recovery.md`
+
+New top-of-tree post-mortem documenting why a hardware `nRST` pulse
+on the EFR32 cannot enter the Gecko Bootloader on this gateway, and
+what was tried:
+
+- PIN reset always boots the application slot — Gecko Stage-2 only
+  enters its UART menu on `SYSREQ`+magic or a `BTL_GPIO_ACTIVATION`
+  pin pulled by the host, neither of which is wired on the Lidl PCB.
+- `PB11` (the canonical `BTL_GPIO_ACTIVATION` pin in old Gecko
+  bootloaders) was checked empirically — not routed to the RTL8196E.
+- Tuya stock firmware confirms the limit: zero `/sys/class/gpio`
+  references, recovery is software-only via
+  `ezspLaunchStandaloneBootloader`.
+
+Lists two untested alternative paths (A: chip-reset on every reboot;
+B: `PA5`/CTS as `BTL_GPIO_ACTIVATION`) for future work — Alternative
+A landed in v3.1 (see RTL8196E CHANGELOG); B is parked.
+
+### Documentation
+
+- Per-firmware READMEs (`24-NCP`, `25-RCP`, `26-OT-RCP`, `27-Router`)
+  rewritten for v3.1: new `flash_efr32.sh` CLI, baud-aware
+  filenames, gateway-side `radio.conf` keys (`MODE`, `BRIDGE_BAUD`,
+  `OTBR_BAUD`) plus the new chip-identity keys (`FIRMWARE`,
+  `FIRMWARE_VERSION`, `FIRMWARE_BAUD`) shown in every "Gateway state
+  after flash" snippet.
+- `2-Zigbee-Radio-Silabs-EFR32/README.md` adds a "Gateway-side
+  runtime configuration" section, a per-firmware supported-baud
+  table, and splits the `radio.conf` keys into "chip-identity" vs
+  "daemon-routing" so readers see at a glance what's informational
+  vs operational.
+- `22-Backup-Flash-Restore/README.md` and
+  `23-Bootloader-UART-Xmodem/README.md` refreshed (USF probe-methods
+  patch reference; chained bootloader+app flash walkthrough).
+- `26-OT-RCP/docker/README.md` lays out the three OT-RCP use cases
+  side-by-side with their gateway-side configuration; emphasises
+  that all three share `FIRMWARE=otrcp` (the chip is the same; only
+  the daemon-routing keys differ).
+- `25-RCP` and `26-OT-RCP` Z2M `configuration.yaml` examples now
+  externalise the device list (`devices: devices.yaml`) like 24-NCP
+  does — keeps personal IEEE addresses out of git.
+
+> Canonical full reference for `radio.conf` keys (including the new
+> `FIRMWARE` / `FIRMWARE_VERSION` / `FIRMWARE_BAUD`) lives in
+> [`../3-Main-SoC-Realtek-RTL8196E/34-Userdata/README.md`](../3-Main-SoC-Realtek-RTL8196E/34-Userdata/README.md#radioconf-keys-full-reference);
+> per-firmware READMEs link to it instead of duplicating.
+
+---
+
 ## [3.0.0] - 2026-04-16
 
 ### UART baud rates — 230400 ceiling removed

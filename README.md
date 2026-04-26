@@ -64,10 +64,14 @@ See [35-Migration](./3-Main-SoC-Realtek-RTL8196E/35-Migration/README.md) for det
 Once the gateway is running (SSH access on port 22):
 
 ```bash
-./flash_efr32.sh <GATEWAY_IP>
+./flash_efr32.sh -y ncp                    # default IP 192.168.1.88
+./flash_efr32.sh -y ncp 460800             # NCP at 460800 baud
+./flash_efr32.sh -y -g 10.0.0.5 otrcp      # custom IP, OT-RCP
+./flash_efr32.sh --help                    # full CLI reference
 ```
 
-Select the firmware for your use case:
+Pick the firmware for your use case (alias = `bootloader`, `ncp`, `rcp`,
+`otrcp`, `router` — numeric `1`-`5` also accepted):
 
 | Choice | Firmware | Use with |
 |--------|----------|----------|
@@ -162,11 +166,41 @@ cd ../33-Rootfs && ./build_rootfs.sh
 cd ../.. && ./flash_install_rtl8196e.sh <GATEWAY_IP>
 
 # Build and flash a Zigbee firmware
-cd 2-Zigbee-Radio-Silabs-EFR32/24-NCP-UART-HW && ./build_ncp.sh
-cd ../.. && ./flash_efr32.sh <GATEWAY_IP>
+cd 2-Zigbee-Radio-Silabs-EFR32/24-NCP-UART-HW && ./build_ncp.sh 460800
+cd ../.. && ./flash_efr32.sh -y -g <GATEWAY_IP> ncp 460800
 ```
 
 See [1-Build-Environment](./1-Build-Environment/README.md) for details.
+
+______________________________________________________________________
+
+## Troubleshooting
+
+### EFR32 Zigbee/Thread radio unresponsive
+
+If the radio chip is stuck (Z2M / ZHA / OTBR can no longer talk to it, but
+Linux / SSH on the gateway are fine), three escalating recovery surfaces are
+available — try them in order:
+
+1. **Long-press the front-panel button (5 seconds)** — the gateway's case
+   button (the one Tuya used for app pairing) is wired up by `S40button` to
+   pulse the EFR32's `nRST` line. The status LED blinks during the hold
+   for visual feedback. Releases the EFR32 from any stuck state and
+   restarts the radio daemon. **No SSH or network needed.**
+2. **`ssh root@<gw> recover_efr32`** — same effect, scriptable, useful
+   when the network works but the radio doesn't.
+3. **`ssh root@<gw> reboot`** — full SoC reboot. Resets the EFR32 too as
+   a side-effect (the SoC's pin-mux register defaults briefly assert the
+   radio's `nRST`). Use this if recovery surfaces 1 and 2 don't bring the
+   radio back, or if you need a Linux-side reset anyway.
+
+If none of these work, the radio firmware itself is unrecoverable from
+software (e.g. user flashed a non-Zigbee firmware that doesn't speak any
+known protocol). Power-cycle the gateway, then reflash via
+`flash_efr32.sh`. The full design rationale, why this is the architecture,
+and what would need to change for a more aggressive recovery story are
+documented in
+[2-Zigbee-Radio-Silabs-EFR32/POST-MORTEM-bootloader-recovery.md](./2-Zigbee-Radio-Silabs-EFR32/POST-MORTEM-bootloader-recovery.md).
 
 ______________________________________________________________________
 

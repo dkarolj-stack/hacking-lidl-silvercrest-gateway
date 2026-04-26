@@ -164,10 +164,15 @@ cat build/third_party/openthread/repo/src/posix/ot-ctl | ssh root@GATEWAY_IP:888
 
 The gateway supports both Zigbee and Thread via `/userdata/etc/radio.conf`:
 
-- **Zigbee** (default): no `radio.conf` file, `S50uart_bridge` arms the in-kernel UART↔TCP bridge
-- **Thread**: `radio.conf` contains `MODE=otbr`, `S70otbr` starts, `S50uart_bridge` is skipped
+- **Zigbee** (default): `radio.conf` carries `BRIDGE_BAUD=<baud>` (and
+  optionally chip-identity keys like `FIRMWARE=ncp`); `S50uart_bridge`
+  arms the in-kernel UART↔TCP bridge.
+- **Thread**: `radio.conf` carries `MODE=otbr` + `OTBR_BAUD=<baud>`;
+  `S70otbr` launches `otbr-agent` and `S50uart_bridge` exits early.
 
-The mode is selected at flash time via `flash_userdata.sh`.
+The mode is selected automatically by `flash_efr32.sh` based on which
+EFR32 firmware you flash; full key reference in
+[`../README.md`](../README.md#radioconf-keys-full-reference).
 
 ## Usage
 

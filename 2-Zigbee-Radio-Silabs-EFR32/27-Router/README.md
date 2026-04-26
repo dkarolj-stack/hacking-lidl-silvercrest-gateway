@@ -28,16 +28,53 @@ This firmware transforms the gateway into an autonomous Zigbee router that exten
 
 ## Option 1: Flash Pre-built Firmware (Recommended)
 
-Pre-built firmware is available in the `firmware/` directory. From the repository root:
+Pre-built firmware is available in the `firmware/` directory. From the
+repository root:
 
 ```bash
-./flash_efr32.sh <GATEWAY_IP>
-# Select [5] Z3-Router
+./flash_efr32.sh -y router                   # default baud 115200, default IP 192.168.1.88
+./flash_efr32.sh -y -g 10.0.0.5 router       # custom gateway IP
+./flash_efr32.sh --help                      # full CLI reference
 ```
 
-The script handles everything (switch the in-kernel UART bridge to flash mode, flash, reboot).
+The script handles everything: pulse `nRST` for a clean chip state, send
+the router's `bootloader reboot` CLI command (the router firmware doesn't
+speak EZSP/CPC/Spinel — entry to the bootloader goes via its mini-CLI),
+upload the new firmware, then write `BRIDGE_BAUD=115200` to
+`/userdata/etc/radio.conf` so the bridge auto-arms at the router CLI baud
+on next boot — meaning you can reach the [mini-CLI](#mini-cli-for-bootloader-and-network-management)
+via `nc 192.168.1.88 8888` immediately after reboot.
 
 The router firmware runs autonomously — no host application needed.
+
+> **Router supports 115200 only** (the mini-CLI is text-based, no benefit
+> from higher baud).
+
+> **Legacy env-var interface** (deprecated):
+> `FW_CHOICE=5 CONFIRM=y ./flash_efr32.sh` still works with a deprecation
+> warning. Prefer the flag form above.
+
+### Gateway state after flash
+
+`flash_efr32.sh` writes to `/userdata/etc/radio.conf`:
+
+```
+FIRMWARE=router        # what's in the EFR32 application slot (v3.2+)
+FIRMWARE_VERSION=7.5.1 # EmberZNet version embedded in the GBL (v3.2+)
+FIRMWARE_BAUD=115200   # the chip's UART baud (v3.2+)
+BRIDGE_BAUD=115200     # consumed by S50uart_bridge → arms TCP:8888 at 115200
+                       # (no MODE= line; otbr-agent stays off)
+```
+
+The `FIRMWARE*` keys are informational; `BRIDGE_BAUD` is what
+`S50uart_bridge` reads at boot. See
+[`3-Main-SoC-Realtek-RTL8196E/34-Userdata/README.md`](../../3-Main-SoC-Realtek-RTL8196E/34-Userdata/README.md#radioconf-keys-full-reference)
+for the full key reference.
+
+The bridge is armed at 115200 (the router's mini-CLI baud) so you can
+reach the [mini-CLI](#mini-cli-for-bootloader-and-network-management)
+via `nc <gateway-ip> 8888` — useful for `network status`,
+`network steer`, and `bootloader reboot` commands.
 
 ---
 
@@ -64,15 +101,19 @@ This installs:
 
 ```bash
 cd 2-Zigbee-Radio-Silabs-EFR32/27-Router
-./build_router.sh
+./build_router.sh                # default baud 115200
+./build_router.sh --help         # show options (router CLI is text-only,
+                                 # higher baud gives no real benefit)
 ```
 
 ### Output
 
 ```
 firmware/
-└── z3-router-7.5.1.gbl   # For UART/Xmodem flashing
+└── z3-router-7.5.1-115200.gbl   # filename embeds EmberZNet version + baud
 ```
+
+`flash_efr32.sh` resolves the right file via a glob.
 
 Other formats (.s37, .hex, .bin) are generated in `build/` but not saved.
 
@@ -101,8 +142,7 @@ configuration:
 
 **Via network (same as Option 1):**
 ```bash
-./flash_efr32.sh <GATEWAY_IP>
-# Select [5] Z3-Router
+./flash_efr32.sh -y router
 ```
 
 **Via J-Link/SWD** (if you have physical access to the SWD pads):

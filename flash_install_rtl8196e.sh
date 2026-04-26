@@ -54,6 +54,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Hardened SSH helpers — see lib/ssh.sh.
+# shellcheck disable=SC1091
+. "${SCRIPT_DIR}/lib/ssh.sh"
 LINUX_IP=""
 FW_VERSION=""
 BOOT_IP="${BOOT_IP:-192.168.1.6}"
@@ -172,19 +176,30 @@ if [ -n "$LINUX_RUNNING" ]; then
     else
         # Port 22 — could be custom or Tuya; SSH in to check
         SSH_SOCK="/tmp/flash_install_ssh_$$"
-        FI_SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o ControlMaster=auto -o ControlPath=$SSH_SOCK -o ControlPersist=10 -p $fw_port"
+        # StrictHostKeyChecking=no + /dev/null known_hosts is intentional:
+        # this workflow installs custom firmware over Tuya stock, so the
+        # gateway's host key changes legitimately mid-flow. ControlMaster
+        # multiplexes the back-to-back commands below over one TCP session.
+        FI_SSH_OPTS=(
+            "${SSH_HARDEN_OPTS[@]}"
+            -o StrictHostKeyChecking=no
+            -o UserKnownHostsFile=/dev/null
+            -o ControlMaster=auto
+            -o ControlPath="$SSH_SOCK"
+            -o ControlPersist=10
+            -p "$fw_port"
+        )
+        FI_SSH_TARGET="root@${fw_host}"
 
         # Verify SSH access before proceeding
-        # shellcheck disable=SC2086
-        if ! ssh $FI_SSH_OPTS "root@${fw_host}" "true" 2>/dev/null; then
+        if ! ssh_retry "${FI_SSH_OPTS[@]}" "$FI_SSH_TARGET" "true" 2>/dev/null; then
             echo "Error: SSH authentication failed." >&2
             exit 1
         fi
 
         # Detect firmware type: devmem present = custom firmware (can boothold)
         # devmem absent = Tuya firmware (even if SSH port was changed to 22)
-        # shellcheck disable=SC2086
-        if ssh $FI_SSH_OPTS "root@${fw_host}" "command -v devmem" >/dev/null 2>&1; then
+        if ssh_retry "${FI_SSH_OPTS[@]}" "$FI_SSH_TARGET" "command -v devmem" >/dev/null 2>&1; then
             fw_type="custom"
         else
             fw_type="tuya"
@@ -194,8 +209,7 @@ if [ -n "$LINUX_RUNNING" ]; then
 
     # Read firmware version early (used for display and auto-flash detection)
     if [ "$fw_type" = "custom" ]; then
-        # shellcheck disable=SC2086
-        fw_ver_line=$(ssh $FI_SSH_OPTS "root@${fw_host}" "head -1 /userdata/etc/version" 2>/dev/null || true)
+        fw_ver_line=$(ssh_retry "${FI_SSH_OPTS[@]}" "$FI_SSH_TARGET" "head -1 /userdata/etc/version" 2>/dev/null || true)
         if [[ "$fw_ver_line" =~ v([0-9]+\.[0-9]+\.[0-9]+) ]]; then
             FW_VERSION="${BASH_REMATCH[1]}"
             echo "Firmware version: v${FW_VERSION}"
@@ -226,8 +240,7 @@ if [ -n "$LINUX_RUNNING" ]; then
 
         SAVE_TAR=$(mktemp)
         SAVE_FILES="etc/eth0.conf etc/mac_address etc/radio.conf etc/leds.conf etc/passwd etc/TZ etc/hostname etc/dropbear ssh thread"
-        # shellcheck disable=SC2086
-        ssh $FI_SSH_OPTS "root@${fw_host}" \
+        ssh_retry "${FI_SSH_OPTS[@]}" "$FI_SSH_TARGET" \
             "tar cf - -C /userdata $SAVE_FILES 2>/dev/null" > "$SAVE_TAR" 2>/dev/null || true
         if [ -s "$SAVE_TAR" ]; then
             tar xf "$SAVE_TAR" -C "$SKEL_WORK" 2>/dev/null || true
@@ -237,11 +250,34 @@ if [ -n "$LINUX_RUNNING" ]; then
         fi
         rm -f "$SAVE_TAR"
 
+        # v2 → v3 migration: pre-v3.0 firmware shipped serialgateway and
+        # had no /userdata/etc/radio.conf — the EFR32-side baud was hard-
+        # coded to 115200 (NCP-UART-HW @ 115200 was the v2.x default). The
+        # v3.x in-kernel UART bridge defaults to 460800 when radio.conf is
+        # missing, which leaves the host bridge mismatched against the
+        # still-115200 chip until either the chip is reflashed or
+        # radio.conf is created. Pre-seed the full v3.x radio.conf
+        # describing the known v2.x state (NCP @ 115200) so the new
+        # userdata boots into a working state AND a future reader can
+        # tell what's on the chip without probing.
+        if [ -n "${FW_VERSION:-}" ] && [ "${FW_VERSION%%.*}" -lt 3 ] \
+           && [ ! -f "${SKEL_WORK}/etc/radio.conf" ]; then
+            echo "Pre-seeding radio.conf for v${FW_VERSION} → v3.x migration (FIRMWARE=ncp @ 115200)."
+            echo "  ↑ Default v2.x assumption. Cancel now (Ctrl-C) and run on the gateway:"
+            echo "      cat > /userdata/etc/radio.conf  (with FIRMWARE=otrcp/rcp/... if non-default),"
+            echo "    then re-run this script — your radio.conf will be preserved."
+            echo "  See 3-Main-SoC-Realtek-RTL8196E/35-Migration/README.md for the recipes."
+            cat > "${SKEL_WORK}/etc/radio.conf" <<EOF
+FIRMWARE=ncp
+FIRMWARE_BAUD=115200
+BRIDGE_BAUD=115200
+EOF
+        fi
+
         echo "Sending boothold + reboot..."
-        # shellcheck disable=SC2086
-        ssh $FI_SSH_OPTS "root@${fw_host}" "boothold && reboot" 2>/dev/null || true
+        ssh_retry "${FI_SSH_OPTS[@]}" "$FI_SSH_TARGET" "boothold && reboot" 2>/dev/null || true
         # Close ControlMaster socket — gateway is rebooting
-        ssh -O exit -o ControlPath="$SSH_SOCK" "root@${fw_host}" 2>/dev/null || true
+        ssh -O exit -o ControlPath="$SSH_SOCK" "$FI_SSH_TARGET" 2>/dev/null || true
     else
         echo ""
         echo "Tuya firmware detected. Cannot boothold automatically."

@@ -303,12 +303,12 @@ After cold boot (no devmem workaround):
 $ universal-silabs-flasher --device socket://192.168.1.127:8888 probe
 Detected ApplicationType.EZSP, version '7.5.1.0 build 0' at 115200
 
-$ ./flash_efr32.sh 192.168.1.127
-ncp-uart-hw-7.5.1.gbl  [####################################]  100%
+$ ./flash_efr32.sh -y -g 192.168.1.127 ncp
+ncp-uart-hw-7.5.1-115200.gbl  [####################################]  100%
 ```
 
 Both probe and flash work in normal mode (CRTSCTS) and flash mode
-(`serialgateway -f`, no hardware flow control).
+(bridge `flow_control=0`, no hardware flow control).
 
 ---
 

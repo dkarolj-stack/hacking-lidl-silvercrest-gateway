@@ -62,7 +62,8 @@ probe that creates `/dev/ttyS1`.
 
 The userdata init script `S50uart_bridge`
 (`3-Main-SoC-Realtek-RTL8196E/34-Userdata/skeleton/etc/init.d/S50uart_bridge`)
-is the normal entry point. It reads `/userdata/etc/radio.conf`:
+is the normal entry point. It reads two keys from
+`/userdata/etc/radio.conf`:
 
 ```
 BRIDGE_BAUD=115200   # or 460800, 691200, 892857 — match the EFR32 firmware
@@ -76,6 +77,13 @@ the UART free for `otbr-agent`.
 Both keys are optional — missing `BRIDGE_BAUD` defaults to 460800,
 missing `BRIDGE_BIND` defaults to 0.0.0.0 (unchanged from v3.0
 behaviour).
+
+`radio.conf` may also carry chip-identity keys (`FIRMWARE`,
+`FIRMWARE_VERSION`, `FIRMWARE_BAUD`, written by `flash_efr32.sh`) and
+the `OTBR_BAUD` key consumed by `S70otbr`. The kernel driver itself
+reads none of those — they are operator-facing metadata, see
+[`34-Userdata/README.md`](../../../../../34-Userdata/README.md#radioconf-keys-full-reference)
+for the full reference.
 
 ## Stats and observability
 

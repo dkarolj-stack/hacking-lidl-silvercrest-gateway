@@ -1,0 +1,94 @@
+#!/bin/sh
+# recover_efr32 — reset the EFR32 Zigbee/Thread radio without rebooting the SoC
+#
+# Usage: recover_efr32 [-q]
+#   -q   quiet (suppress informational output, errors still printed)
+#
+# What it does:
+#   1. Reads MODE from /userdata/etc/radio.conf
+#   2. OTBR mode: stops S70otbr (so otbr-agent doesn't crash on the unexpected
+#      RCP reset), pulses nRST via the bridge driver's sysfs knob, restarts
+#      S70otbr.
+#   3. Zigbee mode (no MODE= or MODE=zigbee): just pulses nRST. The bridge
+#      stays armed; any TCP client (Z2M / ZHA / cpcd / zigbeed running on a
+#      remote host and connected to TCP:8888) needs to handle the brief
+#      disconnection itself — most do this naturally.
+#
+# Note: in this project, cpcd and zigbeed always run on the *remote* host,
+# never on the gateway itself (no local binaries in 33-Rootfs or 34-Userdata
+# skeletons; nothing in init.d to start them). So we don't try to stop them
+# from here. If a future variant ships local cpcd/zigbeed, this script will
+# need extending to coordinate with whichever S<NN><name> init script owns
+# the bridge on the gateway side.
+#
+# Use this when the EFR32 radio is unresponsive but the rest of the gateway
+# is fine (crashed app, J-Link halt, livelock, etc.). For full power-cycle
+# semantics, just run `reboot` instead — that resets the EFR32 too as a side
+# effect (see 2-Zigbee-Radio-Silabs-EFR32/POST-MORTEM-bootloader-recovery.md).
+
+set -e
+
+NRST_KNOB=/sys/module/rtl8196e_uart_bridge/parameters/nrst_pulse
+RADIO_CONF=/userdata/etc/radio.conf
+QUIET=
+
+if [ "$1" = "-q" ]; then
+    QUIET=1
+fi
+
+log() {
+    # Return 0 even when QUIET so `set -e` doesn't abort on a no-op log call.
+    [ -z "$QUIET" ] && echo "$@"
+    return 0
+}
+
+err() {
+    echo "$@" >&2
+}
+
+# Sanity: the sysfs knob must exist (kernel >= 6.18 with the
+# rtl8196e-uart-bridge driver — added in v3.1).
+if [ ! -w "$NRST_KNOB" ]; then
+    err "Error: $NRST_KNOB not writable."
+    err "Need kernel 6.18 with the v3.1 rtl8196e-uart-bridge driver."
+    exit 1
+fi
+
+MODE=zigbee
+if [ -f "$RADIO_CONF" ]; then
+    grep -q '^MODE=otbr' "$RADIO_CONF" && MODE=otbr
+fi
+
+case "$MODE" in
+    otbr)
+        log "Mode: OTBR — stopping otbr-agent before pulse..."
+        /userdata/etc/init.d/S70otbr stop >/dev/null 2>&1 || true
+        # S70otbr's stop case waits for clean dataset flush; give it a beat.
+        sleep 1
+        ;;
+    *)
+        log "Mode: Zigbee — bridge stays armed across the pulse."
+        log "(Any TCP client on :8888 will see a brief disconnect and should reconnect.)"
+        ;;
+esac
+
+log "Pulsing EFR32 nRST..."
+echo 1 > "$NRST_KNOB"
+
+# Boot ROM + app init: 100-300 ms typically. Be generous.
+sleep 1
+
+case "$MODE" in
+    otbr)
+        log "Restarting otbr-agent..."
+        /userdata/etc/init.d/S70otbr start >/dev/null 2>&1 || {
+            err "Warning: S70otbr start returned non-zero."
+            err "Check ps and /var/log/messages."
+            exit 2
+        }
+        log "Done — otbr-agent restarted."
+        ;;
+    *)
+        log "Done — chip reset; clients should reconnect."
+        ;;
+esac

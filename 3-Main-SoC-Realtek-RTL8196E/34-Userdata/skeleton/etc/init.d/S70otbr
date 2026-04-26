@@ -16,8 +16,19 @@
 
 OTBR_BIN="/userdata/usr/bin/otbr-agent"
 
-# UART settings — must match EFR32 OT-RCP firmware
-RCP_URL="spinel+hdlc+uart:///dev/ttyS1?uart-baudrate=460800"
+# UART settings — must match EFR32 OT-RCP firmware.
+# Baud is read from /userdata/etc/radio.conf (OTBR_BAUD= key) so the OT-RCP
+# firmware-baud and the host-side spinel client always agree, even when the
+# user has flashed a non-default-baud OT-RCP via flash_efr32.sh.
+# Default to 460800 (the historical OT-RCP build baud) if the key is absent.
+OTBR_BAUD=460800
+if [ -f /userdata/etc/radio.conf ]; then
+    val=$(grep '^OTBR_BAUD=' /userdata/etc/radio.conf | cut -d= -f2)
+    case "$val" in
+        115200|230400|460800|691200|892857) OTBR_BAUD="$val" ;;
+    esac
+fi
+RCP_URL="spinel+hdlc+uart:///dev/ttyS1?uart-baudrate=${OTBR_BAUD}"
 
 # Network interfaces
 THREAD_IF="wpan0"

@@ -10,14 +10,20 @@
 #   - GECKO_SDK environment variable set
 #
 # Usage:
-#   ./build_rcp.sh           # Build firmware
-#   ./build_rcp.sh clean     # Clean build directory
+#   ./build_rcp.sh                  # Build firmware at default baud (460800)
+#   ./build_rcp.sh 230400           # Build at lower baud (cpcd POSIX-supported only)
+#   ./build_rcp.sh clean            # Clean build directory
+#   ./build_rcp.sh --help           # Show this help
+#
+# NOTE: cpcd validates baud against the POSIX standard list and rejects
+#       non-standard values like 691200 / 892857. RCP is therefore capped
+#       at 460800 in practice.
 #
 # Output:
-#   firmware/rcp-uart-802154.gbl  (ready to flash via UART/Xmodem)
-#   firmware/rcp-uart-802154.s37  (for J-Link/SWD flashing)
+#   firmware/rcp-uart-802154-<BAUD>.gbl  (ready to flash via UART/Xmodem)
+#   firmware/rcp-uart-802154-<BAUD>.s37  (for J-Link/SWD flashing)
 #
-# J. Nilo - December 2025
+# J. Nilo - December 2025; baud parameter added April 2026
 
 set -e
 
@@ -34,18 +40,51 @@ SILABS_TOOLS_DIR="${PROJECT_ROOT}/silabs-tools"
 TARGET_DEVICE="EFR32MG1B232F256GM48"
 PROJECT_NAME="rcp-uart-802154"
 
-# Handle clean command
-if [ "${1:-}" = "clean" ]; then
-    echo "Cleaning build directory..."
-    rm -rf "${BUILD_DIR}"
-    echo "Done."
-    exit 0
+# Default baud — historical RCP default. cpcd POSIX cap is 460800.
+DEFAULT_BAUD=460800
+TESTED_BAUDS="115200 230400 460800"
+
+case "${1:-}" in
+    clean)
+        echo "Cleaning build directory..."
+        rm -rf "${BUILD_DIR}"
+        echo "Done."
+        exit 0
+        ;;
+    --help|-h)
+        sed -n '2,18p' "$0"
+        echo
+        echo "Tested bauds: ${TESTED_BAUDS}"
+        echo "Default baud: ${DEFAULT_BAUD}"
+        exit 0
+        ;;
+    "")
+        BAUD=${DEFAULT_BAUD}
+        ;;
+    *)
+        BAUD="$1"
+        ;;
+esac
+
+if ! echo "${BAUD}" | grep -qE '^[0-9]+$'; then
+    echo "Error: invalid baud '${BAUD}' (must be a positive integer)" >&2
+    echo "Tested bauds: ${TESTED_BAUDS}" >&2
+    exit 1
 fi
+case " ${TESTED_BAUDS} " in
+    *" ${BAUD} "*) ;;
+    *)
+        echo "WARNING: baud ${BAUD} is outside the tested set {${TESTED_BAUDS}}."
+        echo "         RCP firmware at non-POSIX bauds will likely be rejected"
+        echo "         by cpcd at runtime. Build will proceed anyway."
+        ;;
+esac
 
 echo "========================================="
 echo "  RCP 802.15.4 Firmware Builder"
 echo "  Target: ${TARGET_DEVICE}"
 echo "  CPC Protocol: v5 (GSDK 4.5.0)"
+echo "  Baud:   ${BAUD}"
 echo "========================================="
 echo ""
 
@@ -146,7 +185,9 @@ echo "[3/5] Applying configuration..."
 if [ -d "config" ]; then
     cp "${PATCHES_DIR}/sl_cpc_drv_uart_usart_vcom_config.h" config/ 2>/dev/null || true
     cp "${PATCHES_DIR}/sl_cpc_security_config.h" config/ 2>/dev/null || true
-    echo "  - Copied UART config (460800 baud, HW flow control, PA0/PA1/PA4/PA5)"
+    # Substitute the requested baud into the CPC UART config header
+    sed -i "s|^#define SL_CPC_DRV_UART_VCOM_BAUDRATE.*|#define SL_CPC_DRV_UART_VCOM_BAUDRATE                 ${BAUD}|" config/sl_cpc_drv_uart_usart_vcom_config.h
+    echo "  - Copied UART config (baud=${BAUD}, HW flow control, PA0/PA1/PA4/PA5)"
     echo "  - Copied security config (CPC security disabled)"
 fi
 
@@ -196,10 +237,12 @@ echo "Copying output files..."
 mkdir -p "${OUTPUT_DIR}"
 
 SRC_BASE="build/debug/${PROJECT_NAME}"
-OUT_BASE="${PROJECT_NAME}"
+OUT_BASE="${PROJECT_NAME}-${BAUD}"
 
 if [ -f "${SRC_BASE}.s37" ]; then
-    rm -f "${OUTPUT_DIR}"/*.s37 "${OUTPUT_DIR}"/*.gbl "${OUTPUT_DIR}"/*.hex "${OUTPUT_DIR}"/*.bin 2>/dev/null
+    # Only remove the specific files we're about to rewrite — preserve other
+    # baud variants in firmware/ (the matrix lives here side-by-side).
+    rm -f "${OUTPUT_DIR}/${OUT_BASE}".{s37,gbl,hex,bin} 2>/dev/null
 
     # Copy .s37 for J-Link flashing
     cp "${SRC_BASE}.s37" "${OUTPUT_DIR}/${OUT_BASE}.s37"

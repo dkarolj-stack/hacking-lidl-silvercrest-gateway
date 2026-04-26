@@ -9,14 +9,20 @@
 #   - GECKO_SDK environment variable set
 #
 # Usage:
-#   ./build_router.sh           # Build firmware
-#   ./build_router.sh clean     # Clean build directory
+#   ./build_router.sh                  # Build firmware at default baud (115200)
+#   ./build_router.sh 230400           # Build at non-default baud
+#   ./build_router.sh clean            # Clean build directory
+#   ./build_router.sh --help           # Show this help
+#
+# NOTE: the Z3 Router firmware uses UART only for the mini-CLI (text-based
+#       management + Gecko Bootloader entry). 115200 is sufficient — higher
+#       bauds give no practical benefit, but are accepted for consistency.
 #
 # Output:
-#   firmware/z3-router.gbl  (ready to flash via UART/Xmodem)
-#   firmware/z3-router.s37  (for J-Link/SWD flashing)
+#   firmware/z3-router-<EmberVersion>-<BAUD>.gbl  (ready to flash via UART)
+#   firmware/z3-router-<EmberVersion>-<BAUD>.s37  (for J-Link/SWD flashing)
 #
-# J. Nilo - January 2026
+# J. Nilo - January 2026; baud parameter added April 2026
 
 set -e
 
@@ -35,17 +41,49 @@ SILABS_TOOLS_DIR="${PROJECT_ROOT}/silabs-tools"
 # Target chip
 TARGET_DEVICE="EFR32MG1B232F256GM48"
 
-# Handle clean command
-if [ "${1:-}" = "clean" ]; then
-    echo "Cleaning build directory..."
-    rm -rf "${BUILD_DIR}"
-    echo "Done."
-    exit 0
+# Default baud — Router CLI is text-based, 115200 is plenty.
+DEFAULT_BAUD=115200
+TESTED_BAUDS="115200"
+
+case "${1:-}" in
+    clean)
+        echo "Cleaning build directory..."
+        rm -rf "${BUILD_DIR}"
+        echo "Done."
+        exit 0
+        ;;
+    --help|-h)
+        sed -n '2,16p' "$0"
+        echo
+        echo "Tested bauds: ${TESTED_BAUDS}"
+        echo "Default baud: ${DEFAULT_BAUD}"
+        exit 0
+        ;;
+    "")
+        BAUD=${DEFAULT_BAUD}
+        ;;
+    *)
+        BAUD="$1"
+        ;;
+esac
+
+if ! echo "${BAUD}" | grep -qE '^[0-9]+$'; then
+    echo "Error: invalid baud '${BAUD}' (must be a positive integer)" >&2
+    echo "Tested bauds: ${TESTED_BAUDS}" >&2
+    exit 1
 fi
+case " ${TESTED_BAUDS} " in
+    *" ${BAUD} "*) ;;
+    *)
+        echo "WARNING: baud ${BAUD} is outside the tested set {${TESTED_BAUDS}}."
+        echo "         Router CLI is text-only — higher bauds give no benefit."
+        ;;
+esac
 
 echo "========================================="
 echo "  Zigbee 3.0 Router Firmware Builder"
 echo "  Target: ${TARGET_DEVICE}"
+echo "  Baud:   ${BAUD}"
 echo "========================================="
 echo ""
 
@@ -160,7 +198,9 @@ cp "${PATCHES_DIR}/sl_iostream_usart_vcom_config.h" config/
 cp "${PATCHES_DIR}/sl_rail_util_pti_config.h" config/
 cp "${PATCHES_DIR}"/zap-*.h autogen/
 cp "${PATCHES_DIR}"/zap-*.c autogen/ 2>/dev/null || true
-echo "  - Copied UART, PTI, and ZAP files from patches"
+# Substitute the requested baud into the UART config header
+sed -i "s|^#define SL_IOSTREAM_USART_VCOM_BAUDRATE.*|#define SL_IOSTREAM_USART_VCOM_BAUDRATE              ${BAUD}|" config/sl_iostream_usart_vcom_config.h
+echo "  - Copied UART (baud=${BAUD}), PTI, and ZAP files from patches"
 
 echo "  Patching Makefile..."
 ARM_GCC_DIR=$(dirname $(dirname $(which arm-none-eabi-gcc)))
@@ -201,9 +241,11 @@ echo "Copying output files..."
 mkdir -p "${OUTPUT_DIR}"
 
 SRC_BASE="build/debug/${PROJECT_NAME}"
-OUT_BASE="${PROJECT_NAME}-${EMBERZNET_VERSION}"
+OUT_BASE="${PROJECT_NAME}-${EMBERZNET_VERSION}-${BAUD}"
 
-rm -f "${OUTPUT_DIR}"/*.s37 "${OUTPUT_DIR}"/*.gbl "${OUTPUT_DIR}"/*.hex "${OUTPUT_DIR}"/*.bin 2>/dev/null
+# Only remove the specific files we're about to rewrite — preserve other baud
+# variants in firmware/ (the matrix lives here side-by-side).
+rm -f "${OUTPUT_DIR}/${OUT_BASE}".{s37,gbl,hex,bin} 2>/dev/null
 
 # Copy .s37 for J-Link flashing
 cp "${SRC_BASE}.s37" "${OUTPUT_DIR}/${OUT_BASE}.s37"

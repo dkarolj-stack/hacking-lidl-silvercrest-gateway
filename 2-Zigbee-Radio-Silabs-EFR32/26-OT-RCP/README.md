@@ -26,15 +26,52 @@ described below.
 From the repository root:
 
 ```bash
-./flash_efr32.sh <GATEWAY_IP>
-# Select [4] OT-RCP
+./flash_efr32.sh -y otrcp                    # default IP 192.168.1.88
+./flash_efr32.sh -y -g 10.0.0.5 otrcp        # custom IP
+./flash_efr32.sh --help                      # full CLI reference
 ```
 
-The script handles switching the in-kernel UART bridge to flash mode, flash, and reboot.
+The script handles everything: pulse `nRST` for a clean chip state, switch
+the in-kernel UART bridge to flash mode, run the Xmodem upload, then write
+**`FIRMWARE=otrcp` + `FIRMWARE_BAUD=460800` + `MODE=otbr` + `OTBR_BAUD=460800`**
+to `/userdata/etc/radio.conf` so `S70otbr` launches `otbr-agent` on next
+boot — that's **use case 3** below (OTBR on gateway).
+
+For **use case 1 (ZoH)** or **use case 2 (OTBR on host)**, the gateway
+needs `BRIDGE_BAUD=460800` instead of `MODE=otbr` — see
+[`docker/README.md`](docker/README.md) for the per-use-case Quick Start
+that includes the radio-mode switch.
+
+> OT-RCP supports only **460800 baud** (otbr-agent ceiling per
+> CHANGELOG v3.0.0); the script and the build matrix both reflect this.
+
+> **Legacy env-var interface** (deprecated):
+> `FW_CHOICE=4 CONFIRM=y ./flash_efr32.sh` still works with a deprecation
+> warning. Prefer the flag form above.
+
+#### Gateway state after flash (per use case)
+
+The same OT-RCP firmware drives 3 use cases — what differs is what's in
+`/userdata/etc/radio.conf` and which init script wakes up:
+
+All three use cases share the same `FIRMWARE=otrcp` +
+`FIRMWARE_BAUD=460800` chip-side identity (`flash_efr32.sh` writes them);
+what differs is the daemon-routing keys:
+
+| Use case | Daemon-routing keys in `radio.conf` | Init script | Runs on gateway |
+|---|---|---|---|
+| **3 — OTBR on gateway** (default after `-y otrcp`) | `MODE=otbr`<br>`OTBR_BAUD=460800` | `S70otbr` | `otbr-agent` (native) |
+| **1 — ZoH** | `BRIDGE_BAUD=460800` | `S50uart_bridge` | bridge TCP:8888 |
+| **2 — OTBR on host** | `BRIDGE_BAUD=460800` | `S50uart_bridge` | bridge TCP:8888 |
+
+For cases 1 and 2, switch the gateway state after the EFR32 flash — see
+[`docker/README.md` "Switching Radio Mode"](docker/README.md#switching-radio-mode-no-efr32-reflash-needed). The
+`FIRMWARE=otrcp` line stays the same in all three cases — it describes
+the chip, not the deployment.
 
 ### Build from Source
 
-For users who want to customize the firmware or use a different SDK version.
+For users who want to customize the firmware.
 
 ```bash
 # Install Silicon Labs tools (once)
@@ -42,10 +79,12 @@ cd 1-Build-Environment/12-silabs-toolchain && ./install_silabs.sh
 
 # Build
 cd 2-Zigbee-Radio-Silabs-EFR32/26-OT-RCP
-./build_ot_rcp.sh
+./build_ot_rcp.sh                # default baud 460800
+./build_ot_rcp.sh --help         # show baud options
 ```
 
-Output: `firmware/ot-rcp.gbl` (UART flash) and `firmware/ot-rcp.s37` (J-Link/SWD).
+Output: `firmware/ot-rcp-460800.gbl` (UART flash) and
+`firmware/ot-rcp-460800.s37` (J-Link/SWD).
 
 ### Technical Notes
 

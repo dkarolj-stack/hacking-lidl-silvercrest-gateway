@@ -150,13 +150,24 @@ You can update the **Stage 2 bootloader** remotely if you already have a working
 From the repository root:
 
 ```bash
-./flash_efr32.sh <GATEWAY_IP>
-# Select [1] Bootloader
+./flash_efr32.sh -y bootloader                    # default IP 192.168.1.88
+./flash_efr32.sh -y -g 10.0.0.5 bootloader        # custom gateway IP
+./flash_efr32.sh --help                           # full CLI reference
 ```
 
-The script handles switching the in-kernel UART bridge to flash mode, flashing, and the expected `NoFirmwareError`
-(the application slot is empty after a bootloader update). It then prompts you to
-select an application firmware (NCP, RCP, etc.) and flashes it immediately.
+The script handles switching the in-kernel UART bridge to flash mode,
+flashing the new Stage 2, and tolerates the expected `NoFirmwareError`
+(the application slot is empty after a bootloader update). After a
+successful bootloader flash, the chip sits in the Gecko Bootloader
+indefinitely — chain a second invocation to install the application
+firmware:
+
+```bash
+./flash_efr32.sh -y ncp                           # or rcp, otrcp, router
+```
+
+The script auto-detects the chip already in the bootloader (since v3.1)
+and skips the running-app probe, going straight to the upload.
 
 ______________________________________________________________________
 

@@ -27,16 +27,53 @@ This firmware enables communication with Zigbee coordinators like **Zigbee2MQTT*
 
 ## Option 1: Flash Pre-built Firmware (Recommended)
 
-Pre-built firmware is available in the `firmware/` directory. From the repository root:
+Pre-built firmware is available in the `firmware/` directory. From the
+repository root:
 
 ```bash
-./flash_efr32.sh <GATEWAY_IP>
-# Select [2] NCP-UART-HW
+./flash_efr32.sh -y ncp                 # default baud 115200, default IP 192.168.1.88
+./flash_efr32.sh -y ncp 460800          # 460800 baud (faster, max-tested 892857)
+./flash_efr32.sh -y -g 10.0.0.5 ncp     # custom gateway IP
+./flash_efr32.sh --help                 # full CLI reference
 ```
 
-The script handles everything (switch in-kernel UART bridge to flash mode, flash, reboot).
+The script handles everything: pulse `nRST` for a clean chip state, switch
+the in-kernel UART bridge to flash mode, run the Xmodem upload, write the
+matching `BRIDGE_BAUD=<baud>` to `/userdata/etc/radio.conf` so the bridge
+arms at the right speed on next boot, then reboot.
 
-> **Need other formats (.s37, .hex, .bin)?** Build from source (Option 2), they will be in `build/debug/`.
+Supported NCP bauds (pre-built GBLs): 115200, 230400, 460800, 691200, 892857.
+For a custom baud, see [Option 2](#option-2-build-from-source) below.
+
+> **Legacy env-var interface** (deprecated, kept for v3.0.x compat):
+> `FW_CHOICE=2 BAUD_CHOICE=460800 CONFIRM=y ./flash_efr32.sh` still works
+> with a deprecation warning. Prefer the flag form above.
+
+> **Need other formats (.s37, .hex, .bin)?** Build from source (Option 2),
+> they will be in `build/debug/`.
+
+### Gateway state after flash
+
+`flash_efr32.sh` writes the matching baud to `/userdata/etc/radio.conf` so
+the gateway-side init scripts arm the bridge correctly on next boot. For
+NCP at baud `<B>`:
+
+```
+FIRMWARE=ncp           # what's in the EFR32 application slot (v3.2+)
+FIRMWARE_VERSION=7.5.1 # EmberZNet version embedded in the GBL (v3.2+)
+FIRMWARE_BAUD=<B>      # the chip's UART baud (v3.2+)
+BRIDGE_BAUD=<B>        # consumed by S50uart_bridge → arms TCP:8888 at <B>
+                       # (no MODE= line; otbr-agent stays off)
+```
+
+The `FIRMWARE*` keys are informational (humans / future scripts);
+`BRIDGE_BAUD` is what `S50uart_bridge` reads at boot. See
+[`3-Main-SoC-Realtek-RTL8196E/34-Userdata/README.md`](../../3-Main-SoC-Realtek-RTL8196E/34-Userdata/README.md#radioconf-keys-full-reference)
+for the full key reference.
+
+The init script `S50uart_bridge` reads this on boot. Z2M/ZHA then connect
+to `tcp://<gw>:8888` — no baud setting needed on the client side, the
+bridge handles it.
 
 ---
 
@@ -64,17 +101,29 @@ docker run --rm -v $(pwd):/workspace lidl-gateway-builder \
 
 ```bash
 cd 2-Zigbee-Radio-Silabs-EFR32/24-NCP-UART-HW
-./build_ncp.sh
+./build_ncp.sh                  # default baud 115200
+./build_ncp.sh 460800           # custom baud (any value; warns if outside tested set)
+./build_ncp.sh --help           # show baud options + defaults
 ```
 
 ### Output
 
+The output filename embeds the EmberZNet version and the chosen baud:
+
 ```
 firmware/
-└── ncp-uart-hw.gbl   # For UART flashing (via universal-silabs-flasher)
+├── ncp-uart-hw-7.5.1-115200.gbl   # default
+├── ncp-uart-hw-7.5.1-230400.gbl   # if you ran ./build_ncp.sh 230400
+├── ncp-uart-hw-7.5.1-460800.gbl
+├── ncp-uart-hw-7.5.1-691200.gbl
+└── ncp-uart-hw-7.5.1-892857.gbl
 ```
 
-> **Other formats (.s37, .hex, .bin)** are available in `build/debug/` after compilation. Use these for J-Link/SWD flashing or debugging.
+`flash_efr32.sh` resolves the right file via a glob — no need to keep
+filenames in sync manually.
+
+> **Other formats (.s37, .hex, .bin)** are available in `build/debug/`
+> after compilation. Use these for J-Link/SWD flashing or debugging.
 
 ### Clean
 
@@ -86,13 +135,12 @@ firmware/
 
 **Via network (same as Option 1):**
 ```bash
-./flash_efr32.sh <GATEWAY_IP>
-# Select [2] NCP-UART-HW
+./flash_efr32.sh -y ncp 460800     # baud must match what you built above
 ```
 
 **Via J-Link/SWD** (if you have physical access to the SWD pads):
 ```bash
-commander flash firmware/ncp-uart-hw.gbl \
+commander flash firmware/ncp-uart-hw-7.5.1-460800.gbl \
     --device EFR32MG1B232F256GM48
 ```
 
@@ -140,12 +188,29 @@ Add integration with:
 
 ## Customization
 
-> **UART baud rate:** Default is **115200**. With the in-kernel UART
-> bridge on kernel 6.18, rates up to **892857** are supported (460800,
-> 691200, 892857 tested). See
-> [25-RCP-UART-HW](../25-RCP-UART-HW/README.md#baudrate-and-network-considerations) for details.
+### Changing Baudrate
 
-The build process applies patches to optimize the firmware for the Lidl Gateway. See [patches/README.md](https://github.com/jnilo1/hacking-lidl-silvercrest-gateway/blob/main/2-Zigbee-Radio-Silabs-EFR32/24-NCP-UART-HW/patches/README.md) for details.
+Default is **115200**. With the in-kernel UART bridge on kernel 6.18,
+rates up to **892857** are supported (115200, 230400, 460800, 691200,
+892857 tested). See
+[25-RCP-UART-HW](../25-RCP-UART-HW/README.md#baudrate-and-network-considerations)
+for the math behind 892857.
+
+```bash
+# 1. Build the GBL at the desired baud
+cd 2-Zigbee-Radio-Silabs-EFR32/24-NCP-UART-HW && ./build_ncp.sh 460800
+
+# 2. Flash — radio.conf BRIDGE_BAUD is updated automatically
+./flash_efr32.sh -y ncp 460800
+```
+
+NCP/EZSP doesn't have cpcd's POSIX baud restriction, so all 5 tested
+values work end-to-end (Z2M ember adapter, ZHA).
+
+### Network parameters
+
+The build process applies patches to optimize the firmware for the Lidl
+Gateway. See [patches/README.md](https://github.com/jnilo1/hacking-lidl-silvercrest-gateway/blob/main/2-Zigbee-Radio-Silabs-EFR32/24-NCP-UART-HW/patches/README.md) for details.
 
 ### Network Parameters
 

@@ -10,14 +10,19 @@
 #   - GECKO_SDK environment variable set
 #
 # Usage:
-#   ./build_ot_rcp.sh           # Build firmware
-#   ./build_ot_rcp.sh clean     # Clean build directory
+#   ./build_ot_rcp.sh                  # Build firmware at default baud (460800)
+#   ./build_ot_rcp.sh 230400           # Build at non-default baud
+#   ./build_ot_rcp.sh clean            # Clean build directory
+#   ./build_ot_rcp.sh --help           # Show this help
+#
+# NOTE: 460800 is the practical maximum for OT-RCP (max-tested with otbr-agent
+#       per CHANGELOG v3.0.0). Higher bauds are unvalidated.
 #
 # Output:
-#   firmware/ot-rcp.gbl  (ready to flash via UART/Xmodem)
-#   firmware/ot-rcp.s37  (for J-Link/SWD flashing)
+#   firmware/ot-rcp-<BAUD>.gbl  (ready to flash via UART/Xmodem)
+#   firmware/ot-rcp-<BAUD>.s37  (for J-Link/SWD flashing)
 #
-# J. Nilo - January 2026
+# J. Nilo - January 2026; baud parameter added April 2026
 
 set -e
 
@@ -34,18 +39,51 @@ SILABS_TOOLS_DIR="${PROJECT_ROOT}/silabs-tools"
 TARGET_DEVICE="EFR32MG1B232F256GM48"
 PROJECT_NAME="ot-rcp"
 
-# Handle clean command
-if [ "${1:-}" = "clean" ]; then
-    echo "Cleaning build directory..."
-    rm -rf "${BUILD_DIR}"
-    echo "Done."
-    exit 0
+# Default baud — historical OT-RCP default and tested ceiling.
+DEFAULT_BAUD=460800
+TESTED_BAUDS="460800"
+
+case "${1:-}" in
+    clean)
+        echo "Cleaning build directory..."
+        rm -rf "${BUILD_DIR}"
+        echo "Done."
+        exit 0
+        ;;
+    --help|-h)
+        sed -n '2,16p' "$0"
+        echo
+        echo "Tested bauds: ${TESTED_BAUDS}"
+        echo "Default baud: ${DEFAULT_BAUD}"
+        exit 0
+        ;;
+    "")
+        BAUD=${DEFAULT_BAUD}
+        ;;
+    *)
+        BAUD="$1"
+        ;;
+esac
+
+if ! echo "${BAUD}" | grep -qE '^[0-9]+$'; then
+    echo "Error: invalid baud '${BAUD}' (must be a positive integer)" >&2
+    echo "Tested bauds: ${TESTED_BAUDS}" >&2
+    exit 1
 fi
+case " ${TESTED_BAUDS} " in
+    *" ${BAUD} "*) ;;
+    *)
+        echo "WARNING: baud ${BAUD} is outside the tested set {${TESTED_BAUDS}}."
+        echo "         Build will proceed but the OT-RCP/otbr-agent path is"
+        echo "         only validated at 460800."
+        ;;
+esac
 
 echo "========================================="
 echo "  OpenThread RCP Firmware Builder"
 echo "  Target: ${TARGET_DEVICE}"
 echo "  Protocol: Thread 1.3 / Matter"
+echo "  Baud:   ${BAUD}"
 echo "========================================="
 echo ""
 
@@ -150,7 +188,9 @@ echo "[3/4] Applying configuration..."
 # Copy UARTDRV config for Lidl Gateway pins (PA0/PA1/PA4/PA5)
 if [ -f "${PATCHES_DIR}/sl_uartdrv_usart_vcom_config.h" ]; then
     cp "${PATCHES_DIR}/sl_uartdrv_usart_vcom_config.h" config/
-    echo "  - Copied UARTDRV config (115200 baud, HW flow control, PA0/PA1/PA4/PA5)"
+    # Substitute the requested baud into the UARTDRV config header
+    sed -i "s|^#define SL_UARTDRV_USART_VCOM_BAUDRATE.*|#define SL_UARTDRV_USART_VCOM_BAUDRATE        ${BAUD}|" config/sl_uartdrv_usart_vcom_config.h
+    echo "  - Copied UARTDRV config (baud=${BAUD}, HW flow control, PA0/PA1/PA4/PA5)"
 fi
 
 # Copy PTI config: PTI is disabled on this gateway (no debug probe connected).
@@ -209,10 +249,12 @@ echo "Copying output files..."
 mkdir -p "${OUTPUT_DIR}"
 
 SRC_BASE="build/debug/${PROJECT_NAME}"
-OUT_BASE="${PROJECT_NAME}"
+OUT_BASE="${PROJECT_NAME}-${BAUD}"
 
 if [ -f "${SRC_BASE}.s37" ]; then
-    rm -f "${OUTPUT_DIR}"/*.s37 "${OUTPUT_DIR}"/*.gbl "${OUTPUT_DIR}"/*.hex "${OUTPUT_DIR}"/*.bin 2>/dev/null
+    # Only remove the specific files we're about to rewrite — preserve other
+    # baud variants in firmware/ (the matrix lives here side-by-side).
+    rm -f "${OUTPUT_DIR}/${OUT_BASE}".{s37,gbl,hex,bin} 2>/dev/null
 
     # Copy .s37 for J-Link flashing
     cp "${SRC_BASE}.s37" "${OUTPUT_DIR}/${OUT_BASE}.s37"
