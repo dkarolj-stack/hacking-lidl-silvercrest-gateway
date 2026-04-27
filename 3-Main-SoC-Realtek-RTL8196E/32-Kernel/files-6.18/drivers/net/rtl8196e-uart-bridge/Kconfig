@@ -5,17 +5,18 @@ config RTL8196E_UART_BRIDGE
 	help
 	  In-kernel byte shoveler between a TTY port (typically /dev/ttyS1,
 	  the link to the Silabs EFR32 Zigbee/Thread radio) and a listening
-	  TCP socket. Replaces the userspace serialgateway daemon so the hot
-	  path can live in instruction SRAM (IRAM) and run without any user
-	  context switch, which is required to sustain 460800 baud on the
-	  Lexra RLX4181.
+	  TCP socket. Replaces the userspace serialgateway daemon, removing
+	  the user/kernel context-switch overhead per byte that capped the
+	  earlier daemon at moderate baud rates on the single-core Lexra
+	  RLX4181. Sustains 892857 baud (the SoC's N+1 divisor maximum) with
+	  no overrun/framing errors under multi-hour soak.
 
 	  Protocol-agnostic: forwards raw bytes in both directions, used by
 	  EZSP (NCP), CPC (RCP), and Spinel (OT-RCP) clients alike.
 
-	  Must be built in (=y), not as a module. The IRAM gather in
-	  vmlinux.lds.S only collects the .iram section from built-in code;
-	  loadable modules keep their hot path in cached DRAM and defeat the
-	  whole point of the driver.
+	  Must be built in (=y), not as a module. The driver registers at
+	  late_initcall and depends on the tty/serial and net subsystems
+	  being initialized; there is no module exit path because the
+	  driver is never unloaded.
 
 	  If unsure, say N.

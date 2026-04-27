@@ -59,26 +59,25 @@ what differs is the daemon-routing keys:
 
 | Use case | Daemon-routing keys in `radio.conf` | Init script that wakes up |
 |---|---|---|
-| 1 (ZoH) | `BRIDGE_BAUD=460800` | `S50uart_bridge` arms TCP:8888 |
-| 2 (OTBR host) | `BRIDGE_BAUD=460800` | `S50uart_bridge` arms TCP:8888 |
-| 3 (OTBR gateway) | `MODE=otbr` + `OTBR_BAUD=460800` | `S70otbr` launches otbr-agent |
+| 1 (ZoH) | (no `MODE` line) | `S50uart_bridge` arms TCP:8888 |
+| 2 (OTBR host) | (no `MODE` line) | `S50uart_bridge` arms TCP:8888 |
+| 3 (OTBR gateway) | `MODE=otbr` | `S70otbr` launches otbr-agent |
 
 `flash_efr32.sh -y otrcp` sets the **case 3** state by default
-(`MODE=otbr` + `OTBR_BAUD=460800`). To use case 1 or 2 instead, switch
-the gateway state explicitly after the EFR32 flash:
+(`MODE=otbr`). To use case 1 or 2 instead, switch the gateway state
+explicitly after the EFR32 flash:
 
 ```bash
-# Case 1 or 2 — Zigbee bridge mode at the OT-RCP firmware baud (460800)
+# Case 1 or 2 — Zigbee bridge mode (drop MODE so S50uart_bridge wins)
 ssh root@192.168.1.88 "
-    sed -i '/^MODE=/d;/^OTBR_BAUD=/d;/^BRIDGE_BAUD=/d' /userdata/etc/radio.conf
-    echo 'BRIDGE_BAUD=460800' >> /userdata/etc/radio.conf
+    sed -i '/^MODE=/d' /userdata/etc/radio.conf
     reboot
 "
 
 # Case 3 — Thread mode (this is what flash_efr32.sh -y otrcp does by default)
 ssh root@192.168.1.88 "
-    sed -i '/^MODE=/d;/^OTBR_BAUD=/d;/^BRIDGE_BAUD=/d' /userdata/etc/radio.conf
-    printf 'MODE=otbr\nOTBR_BAUD=460800\n' >> /userdata/etc/radio.conf
+    sed -i '/^MODE=/d' /userdata/etc/radio.conf
+    echo 'MODE=otbr' >> /userdata/etc/radio.conf
     reboot
 "
 ```
@@ -87,7 +86,8 @@ ssh root@192.168.1.88 "
 > bridge at its compile-time default (115200), which doesn't match the
 > OT-RCP firmware's 460800 baud — Z2M's `zoh` adapter and the OTBR-host
 > docker would then talk to the chip at the wrong speed and fail
-> silently. Always set `BRIDGE_BAUD=460800` explicitly.
+> silently. Keep `FIRMWARE_BAUD=460800` (written by `flash_efr32.sh`)
+> in place; only `MODE` switches between use cases.
 
 Alternatively, `3-Main-SoC-Realtek-RTL8196E/34-Userdata/flash_userdata.sh`
 sets the mode at flash time via its prompt — useful for a fresh userdata
@@ -116,11 +116,10 @@ Runs Zigbee2MQTT with the `zoh` adapter. The Zigbee stack runs on the host
    ```
 
 2. **Switch gateway to Zigbee bridge mode** (the script set MODE=otbr by
-   default; case 1 needs BRIDGE_BAUD=460800 instead):
+   default; case 1 just needs that line dropped so `S50uart_bridge` wins):
    ```bash
    ssh root@192.168.1.88 "
-       sed -i '/^MODE=/d;/^OTBR_BAUD=/d;/^BRIDGE_BAUD=/d' /userdata/etc/radio.conf
-       echo 'BRIDGE_BAUD=460800' >> /userdata/etc/radio.conf
+       sed -i '/^MODE=/d' /userdata/etc/radio.conf
        reboot
    "
    ```
@@ -166,13 +165,13 @@ runs on the host.
 
 #### 2. Switch gateway to Zigbee bridge mode
 
-The script set `MODE=otbr` by default (case 3); case 2 needs
-`BRIDGE_BAUD=460800` so OTBR-in-docker can reach the EFR32 over TCP:8888:
+The script set `MODE=otbr` by default (case 3); case 2 just needs that
+line dropped so `S50uart_bridge` arms TCP:8888 and OTBR-in-docker can
+reach the EFR32:
 
 ```bash
 ssh root@192.168.1.88 "
-    sed -i '/^MODE=/d;/^OTBR_BAUD=/d;/^BRIDGE_BAUD=/d' /userdata/etc/radio.conf
-    echo 'BRIDGE_BAUD=460800' >> /userdata/etc/radio.conf
+    sed -i '/^MODE=/d' /userdata/etc/radio.conf
     reboot
 "
 ```
@@ -242,7 +241,7 @@ This is the recommended setup for Thread/Matter since v2.0.
 #### 1. Flash OT-RCP firmware on the EFR32 (auto-sets Thread mode)
 
 The simplest path — `flash_efr32.sh -y otrcp` flashes the firmware AND
-writes `MODE=otbr` + `OTBR_BAUD=460800` to `radio.conf` so `S70otbr`
+writes `MODE=otbr` + `FIRMWARE_BAUD=460800` to `radio.conf` so `S70otbr`
 launches `otbr-agent` on next boot:
 
 ```bash

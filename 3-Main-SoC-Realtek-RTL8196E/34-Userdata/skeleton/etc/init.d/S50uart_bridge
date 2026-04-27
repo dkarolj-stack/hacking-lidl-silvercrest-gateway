@@ -11,7 +11,8 @@
 # does not yet exist.
 #
 # Configuration: /userdata/etc/radio.conf
-#   BRIDGE_BAUD=460800   (default: 460800)
+#   FIRMWARE_BAUD=460800 (default: 460800; the chip-side UART baud, written
+#                         by flash_efr32.sh — both ends of the link must agree)
 #   BRIDGE_BIND=0.0.0.0  (default: 0.0.0.0 = all interfaces; set to
 #                         127.0.0.1 to restrict to loopback and reach
 #                         the bridge only via an SSH tunnel — see
@@ -37,10 +38,14 @@ start)
         exit 0
     fi
 
-    # Read baud from config, default 460800
+    # Read baud from config, default 460800. FIRMWARE_BAUD is the chip-side
+    # truth (set by flash_efr32.sh on every successful flash); a working link
+    # forces both ends to the same baud. Fall back to legacy BRIDGE_BAUD for
+    # configs migrated from v3.0.x that pre-date the single-key cleanup.
     BAUD=460800
     if [ -f /userdata/etc/radio.conf ]; then
-        val=$(grep '^BRIDGE_BAUD=' /userdata/etc/radio.conf | cut -d= -f2)
+        val=$(grep '^FIRMWARE_BAUD=' /userdata/etc/radio.conf | cut -d= -f2)
+        [ -z "$val" ] && val=$(grep '^BRIDGE_BAUD=' /userdata/etc/radio.conf | cut -d= -f2)
         [ -n "$val" ] && BAUD="$val"
     fi
 

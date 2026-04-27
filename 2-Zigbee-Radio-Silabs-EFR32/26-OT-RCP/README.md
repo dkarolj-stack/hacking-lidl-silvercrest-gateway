@@ -33,12 +33,12 @@ From the repository root:
 
 The script handles everything: pulse `nRST` for a clean chip state, switch
 the in-kernel UART bridge to flash mode, run the Xmodem upload, then write
-**`FIRMWARE=otrcp` + `FIRMWARE_BAUD=460800` + `MODE=otbr` + `OTBR_BAUD=460800`**
-to `/userdata/etc/radio.conf` so `S70otbr` launches `otbr-agent` on next
+**`FIRMWARE=otrcp` + `FIRMWARE_BAUD=460800` + `MODE=otbr`** to
+`/userdata/etc/radio.conf` so `S70otbr` launches `otbr-agent` on next
 boot — that's **use case 3** below (OTBR on gateway).
 
-For **use case 1 (ZoH)** or **use case 2 (OTBR on host)**, the gateway
-needs `BRIDGE_BAUD=460800` instead of `MODE=otbr` — see
+For **use case 1 (ZoH)** or **use case 2 (OTBR on host)**, drop the
+`MODE=otbr` line so `S50uart_bridge` takes over instead — see
 [`docker/README.md`](docker/README.md) for the per-use-case Quick Start
 that includes the radio-mode switch.
 
@@ -60,9 +60,9 @@ what differs is the daemon-routing keys:
 
 | Use case | Daemon-routing keys in `radio.conf` | Init script | Runs on gateway |
 |---|---|---|---|
-| **3 — OTBR on gateway** (default after `-y otrcp`) | `MODE=otbr`<br>`OTBR_BAUD=460800` | `S70otbr` | `otbr-agent` (native) |
-| **1 — ZoH** | `BRIDGE_BAUD=460800` | `S50uart_bridge` | bridge TCP:8888 |
-| **2 — OTBR on host** | `BRIDGE_BAUD=460800` | `S50uart_bridge` | bridge TCP:8888 |
+| **3 — OTBR on gateway** (default after `-y otrcp`) | `MODE=otbr` | `S70otbr` | `otbr-agent` (native) |
+| **1 — ZoH** | (no `MODE` line) | `S50uart_bridge` | bridge TCP:8888 |
+| **2 — OTBR on host** | (no `MODE` line) | `S50uart_bridge` | bridge TCP:8888 |
 
 For cases 1 and 2, switch the gateway state after the EFR32 flash — see
 [`docker/README.md` "Switching Radio Mode"](docker/README.md#switching-radio-mode-no-efr32-reflash-needed). The

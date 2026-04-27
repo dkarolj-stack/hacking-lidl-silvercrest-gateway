@@ -97,12 +97,12 @@ controlled by `/userdata/etc/radio.conf`** (managed automatically by
 
 | Mode | `radio.conf` keys | Init script that wakes up | EFR32 firmware | Use case |
 |------|---------|-------------|----------------|----------|
-| **Zigbee** (default) | `BRIDGE_BAUD=<baud>` | `S50uart_bridge` | NCP, RCP, or OT-RCP for ZoH/OTBR-host | Zigbee2MQTT, ZHA, OTBR-on-host |
-| **Thread** | `MODE=otbr` + `OTBR_BAUD=<baud>` | `S70otbr` | OT-RCP | Matter, Home Assistant Thread (OTBR-on-gateway) |
+| **Zigbee** (default) | `FIRMWARE_BAUD=<baud>` (no `MODE`) | `S50uart_bridge` | NCP, RCP, or OT-RCP for ZoH/OTBR-host | Zigbee2MQTT, ZHA, OTBR-on-host |
+| **Thread** | `FIRMWARE_BAUD=<baud>` + `MODE=otbr` | `S70otbr` | OT-RCP | Matter, Home Assistant Thread (OTBR-on-gateway) |
 
 When `MODE=otbr` is present, `S50uart_bridge` is skipped and `S70otbr`
 starts `otbr-agent` instead. When absent (Zigbee mode), `S50uart_bridge`
-arms the in-kernel UART bridge at `BRIDGE_BAUD`.
+arms the in-kernel UART bridge at `FIRMWARE_BAUD`.
 
 See `ot-br-posix/README.md` for Thread-specific documentation.
 
@@ -110,18 +110,23 @@ See `ot-br-posix/README.md` for Thread-specific documentation.
 
 | Key | Values | Default | Written by | Read by |
 |-----|--------|---------|------------|---------|
-| `FIRMWARE` | `ncp`, `rcp`, `otrcp`, `router` | (absent) | `flash_efr32.sh` (v3.2+) | docs / diagnostics |
-| `FIRMWARE_VERSION` | e.g. `7.5.1` (NCP, Router only) | (absent) | `flash_efr32.sh` (v3.2+) | docs / diagnostics |
-| `FIRMWARE_BAUD` | `115200`, `230400`, `460800`, `691200`, `892857` | (absent) | `flash_efr32.sh` (v3.2+) | docs / diagnostics |
-| `BOOTLOADER_VERSION` | e.g. `2.4.2` | (absent) | `flash_efr32.sh` (v3.2+) — every flash | docs / diagnostics |
+| `FIRMWARE` | `ncp`, `rcp`, `otrcp`, `router` | (absent) | `flash_efr32.sh` | docs / diagnostics |
+| `FIRMWARE_VERSION` | e.g. `7.5.1` (NCP, Router only) | (absent) | `flash_efr32.sh` | docs / diagnostics |
+| `FIRMWARE_BAUD` | `115200`, `230400`, `460800`, `691200`, `892857` | `460800` | `flash_efr32.sh` | `S50uart_bridge`, `S70otbr` |
+| `BOOTLOADER_VERSION` | e.g. `2.4.2` | (absent) | `flash_efr32.sh` — every flash | docs / diagnostics |
 | `MODE` | `otbr` (or absent) | (absent = Zigbee) | `flash_efr32.sh` | `S50uart_bridge`, `S70otbr` |
-| `BRIDGE_BAUD` | `115200`, `230400`, `460800`, `691200`, `892857` | `460800` | `flash_efr32.sh` (Zigbee path) | `S50uart_bridge` |
-| `OTBR_BAUD` | `115200`, `230400`, `460800`, `691200`, `892857` | `460800` | `flash_efr32.sh` (OTBR path) | `S70otbr` (v3.1+) |
 | `BRIDGE_BIND` | `0.0.0.0`, `127.0.0.1` | `0.0.0.0` | (manual) | `S50uart_bridge` |
 
-`flash_efr32.sh` writes the right `MODE` and `BRIDGE_BAUD`/`OTBR_BAUD`
-keys based on the firmware you flash — manual editing is only needed
-for advanced cases like OT-RCP in ZoH or OTBR-on-host modes (see
+> **Migrated from v3.0.x?** Older releases wrote two redundant host-side
+> keys, `BRIDGE_BAUD` (Zigbee) and `OTBR_BAUD` (OTBR), in addition to
+> `FIRMWARE_BAUD`. v3.2+ collapses them to the single `FIRMWARE_BAUD`
+> truth. Both init scripts still fall back to the legacy keys when
+> `FIRMWARE_BAUD` is absent, and the next `flash_efr32.sh` run strips
+> them automatically — no user action needed.
+
+`flash_efr32.sh` writes the right `MODE` and `FIRMWARE_BAUD` based on
+the firmware you flash — manual editing is only needed for advanced
+cases like OT-RCP in ZoH or OTBR-on-host modes (see
 [`2-Zigbee-Radio-Silabs-EFR32/26-OT-RCP/docker/README.md`](../../2-Zigbee-Radio-Silabs-EFR32/26-OT-RCP/docker/README.md#switching-radio-mode-no-efr32-reflash-needed)).
 
 #### `FIRMWARE` / `FIRMWARE_VERSION` / `FIRMWARE_BAUD` / `BOOTLOADER_VERSION` (v3.2+)
@@ -141,10 +146,11 @@ running without probing the chip via `universal-silabs-flasher`.
   — for those, the meaningful version lives host-side (`zigbeed` for
   RCP, `ot-br-posix` for OT-RCP).
 * `FIRMWARE_BAUD` — the chip's UART baud as configured at last flash.
-  Source of truth for "what speed does the chip expect"; the
-  operational `BRIDGE_BAUD` / `OTBR_BAUD` should normally match. If
-  they diverge, the host-side daemons can't reach the chip — fix it
-  by re-running `flash_efr32.sh` or by editing `radio.conf` to match.
+  Single source of truth: both `S50uart_bridge` (Zigbee) and `S70otbr`
+  (OTBR) read this same key, since a working UART link forces both ends
+  to the same baud. If you ever set it to something the chip isn't
+  actually running at, the host-side daemons can't reach the chip — fix
+  it by re-running `flash_efr32.sh` or by editing `radio.conf` to match.
 * `BOOTLOADER_VERSION` — Gecko Bootloader Stage-2 version (e.g. `2.4.2`)
   as reported by `universal-silabs-flasher` during the last flash. Both
   bootloader-only and app flashes refresh this — USF transits the
@@ -166,7 +172,7 @@ To switch between modes on a running gateway:
 # or: ./flash_efr32.sh -y -g 10.0.0.5 ncp  # custom IP
 
 # That's it. The script stops otbr-agent if running, flashes the new
-# firmware, writes BRIDGE_BAUD=<baud> to /userdata/etc/radio.conf
+# firmware, writes FIRMWARE_BAUD=<baud> to /userdata/etc/radio.conf
 # (no MODE= line → S50uart_bridge takes over instead of S70otbr),
 # then reboots.
 ```
@@ -177,7 +183,7 @@ To switch between modes on a running gateway:
 ./flash_efr32.sh -y otrcp
 
 # That's it. The script stops the bridge daemons, flashes OT-RCP,
-# writes MODE=otbr + OTBR_BAUD=460800 to radio.conf so S70otbr
+# writes MODE=otbr + FIRMWARE_BAUD=460800 to radio.conf so S70otbr
 # launches otbr-agent on next boot, then reboots.
 ```
 
@@ -267,7 +273,7 @@ coordinators to communicate with the Silabs EFR32 radio remotely.
 | sysfs param | Default | Description |
 |-------------|---------|-------------|
 | `tty` | `/dev/ttyS1` | TTY device path (root only) |
-| `baud` | `460800` via `BRIDGE_BAUD` in `/userdata/etc/radio.conf` | UART baud rate |
+| `baud` | `460800` via `FIRMWARE_BAUD` in `/userdata/etc/radio.conf` | UART baud rate |
 | `port` | `8888` | TCP listen port (root only) |
 | `bind_addr` | `0.0.0.0` | TCP bind address (root only) |
 | `flow_control` | `1` | Hardware RTS/CTS (set `0` for EFR32 flash) |

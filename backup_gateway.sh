@@ -48,34 +48,6 @@ if [ -z "$BACKUP_DIR" ]; then
     BACKUP_DIR="${SCRIPT_DIR}/backups/$(date '+%Y%m%d-%H%M')"
 fi
 
-# --- prerequisites -----------------------------------------------------------
-
-# Check that tftp-hpa client is installed (the script uses its "-c" syntax)
-check_tftp() {
-    local tftp_usage
-    tftp_usage="$(tftp --help 2>&1 || true)"
-    if ! command -v tftp >/dev/null 2>&1 || ! echo "$tftp_usage" | grep -q '\-c'; then
-        echo "Error: tftp-hpa client not found (need the -c flag)." >&2
-        echo "Install it with: sudo apt install tftp-hpa" >&2
-        exit 1
-    fi
-}
-
-# Resolve the outgoing network interface to a given IP
-resolve_iface() {
-    local ip="$1"
-    IFACE="$(ip route get "$ip" 2>/dev/null \
-        | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')"
-    if [ -z "${IFACE:-}" ]; then
-        echo "Error: cannot determine outgoing interface to ${ip}." >&2
-        exit 1
-    fi
-    if ip route get "$ip" 2>/dev/null | grep -qE '\svia\s'; then
-        echo "Error: ${ip} is reached via a gateway (routed). Must be same L2 segment." >&2
-        exit 1
-    fi
-}
-
 # --- detection helpers -------------------------------------------------------
 
 # Check if bootloader is reachable (ARP resolves on BOOT_IP)
@@ -226,9 +198,6 @@ handle_bootloader() {
 }
 
 # --- main --------------------------------------------------------------------
-
-check_tftp
-resolve_iface "$BOOT_IP"
 
 mkdir -p "$BACKUP_DIR"
 

@@ -6,6 +6,134 @@ rootfs (33-), and userdata (34-).
 
 ---
 
+## [3.1.1] - 2026-04-27
+
+Hardening pass on the kernel UART bridge and a few operator-facing
+rough edges sanded off the flash tooling. No new features; one config
+simplification (`radio.conf` collapses two redundant baud keys into
+one). Upgrade is in-place — no user action needed for legacy configs.
+
+### Kernel — `rtl8196e-uart-bridge` hardening
+
+Four correctness fixes landed together; one image rebuild covers
+them all (`kernel-6.18.img` refreshed once at the end of the batch).
+No operator-visible behaviour change in the normal path.
+
+* **Drop `bridge_lock` across `nrst_pulse`'s `msleep(100)`.**
+  `param_set_nrst_pulse()` used to hold the global mutex from the
+  lazy syscon init through the full assert/sleep/release sequence,
+  so the UART → TCP hot path stalled for ~100 ms on every EFR32
+  reset. Real-world impact is minimal (the protocol asks operators
+  to stop the radio daemon before pulsing), but holding a global
+  mutex across `msleep` on a single-core CPU is sloppy. Narrowed
+  `bridge_lock` to the syscon lookup; the assert/sleep/release runs
+  under a new dedicated `nrst_pulse_lock` so concurrent pulses still
+  serialize on the syscon bits.
+* **Drop the stale IRAM promise from Kconfig and the
+  `late_initcall` comment.** Both claimed the hot path lives in
+  IRAM; in practice the IRAM placement was shelved after measurement
+  showed plain `.text` was sufficient at 892857 baud (see
+  `DESIGN.md` "Options considered and dropped"). Doc-only — keeps
+  the built-in requirement, justifies it via `late_initcall`
+  ordering and the no-unload contract instead.
+* **Tighten `status_led_brightness` lock discipline.** The
+  brightness param was wired through `module_param_named` with a
+  direct write to the int variable; the worker thread read the same
+  variable unlocked when firing the LED trigger on client connect.
+  Real-world impact minimal (32-bit aligned int, RLX4181 won't
+  tear), but it was the only live-tunable param bypassing the lock
+  and KCSAN would flag the data race. Converted to `module_param_cb`
+  with locked setter/getter (same pattern as `baud`, `port`,
+  `bind_addr`, `flow_control`); the worker now snapshots the
+  clamped value into a local under `bridge_lock` so
+  `led_trigger_event` runs lockless without racing the setter.
+* **Save and restore tty `client_ops` verbatim across arm/disarm.**
+  `bridge_arm_locked()` replaced `tty->port->client_ops` with our
+  hook, but disarm/err paths always wrote
+  `tty_port_default_client_ops` back. Today that's the same pointer
+  (ttyS1 carries the default at boot) so the bug is purely latent —
+  but if the port ever gets a `serdev` or other layered consumer
+  ahead of us, disarm would silently overwrite it. Now stashes the
+  previous pointer in `state.saved_client_ops` at arm time and
+  restores it from there.
+
+### `flash_efr32.sh` — refuse to flash when the bridge is in use
+
+Reads `/proc/net/tcp` on the gateway in the existing detection
+heredoc; emits `PEER=IP:PORT` (or empty) alongside the other
+`KEY=VALUE` lines. If non-empty, abort with the peer's IP so the
+operator knows which host to silence. Otherwise the kernel bridge
+would silently replace the existing client (`"replacing previous
+client"` in `dmesg`) and let Z2M / ZHA / `otbr-agent` fight USF for
+the socket. Covers Z2M wherever it lives — gateway, the host
+running the script, or any third box (Pi/NAS) — `/proc/net/tcp` on
+the gateway sees them all uniformly. No `--force` escape hatch:
+stop the right process on the right machine.
+
+### `backup_gateway.sh` + `flash_install_rtl8196e.sh` — defer the `BOOT_IP` L2 check (issue #88)
+
+Both scripts ran an unconditional pre-flight check that `BOOT_IP`
+(default `192.168.1.6`, the bootloader's hard-coded TFTP IP) was on
+the same L2 segment. SSH backup and SSH-based firmware detection
+don't need that — they only need `LINUX_IP` — so users on a routed
+network were blocked before the script could do anything useful.
+
+* `backup_gateway.sh` — drop the unconditional check and the
+  now-unused `check_tftp` / `resolve_iface` helpers. SSH backup
+  runs from any routable subnet.
+* `flash_install_rtl8196e.sh` — new `require_boot_l2` helper
+  (resolves `IFACE`, enforces L2, prints a `sudo ip addr add
+  192.168.1.10/24 dev <iface>` hint). Called lazily — just before
+  `boothold && reboot` on the upgrade path, immediately on the
+  bootloader-only path. Backup proposal and config save still work
+  from a routed network; failure now surfaces *before* the gateway
+  is tipped into bootloader mode rather than after.
+
+Reported by @skinkie on a v2.x → v3.1 migration with the gateway at
+`192.168.5.252` and the host on the same routed subnet.
+
+### `radio.conf` — single baud key
+
+Pre-v3.1.1 `radio.conf` carried two redundant baud keys: a chip-
+side `FIRMWARE_BAUD` (set at flash time, "what's on the chip") and
+a host-side `BRIDGE_BAUD` (Zigbee path) or `OTBR_BAUD` (OTBR path)
+read by the init scripts. Both ends of a UART link must agree, so
+in practice the keys were always written and read at the same
+value — duplication that only created room for divergence and
+confusion.
+
+Single source of truth: `FIRMWARE_BAUD`. Both `S50uart_bridge` and
+`S70otbr` read this same key now.
+
+* `flash_efr32.sh` stops emitting `BRIDGE_BAUD` / `OTBR_BAUD`
+  entirely; the existing `sed` cleanup in the persist path strips
+  legacy keys so old configs converge on every flash.
+* `flash_install_rtl8196e.sh`'s v2 → v3 migration heredoc only
+  writes `FIRMWARE_BAUD` now.
+* Backwards compat: `S50uart_bridge` / `S70otbr` fall back to the
+  legacy host-side keys when `FIRMWARE_BAUD` is absent, so a v3.0.x
+  install upgrading to v3.1.1+ keeps working until the next
+  `flash_efr32.sh` run strips them. **No user action needed.**
+
+OT-RCP three-case switching (1/2 ↔ 3) becomes simpler too: just
+add or remove `MODE=otbr` — no baud key to flip — see
+[`26-OT-RCP/docker/README.md`](../2-Zigbee-Radio-Silabs-EFR32/26-OT-RCP/docker/README.md#switching-radio-mode-no-efr32-reflash-needed).
+
+### Documentation
+
+- ~14 README files swept to drop `BRIDGE_BAUD` / `OTBR_BAUD` from
+  user-facing reference (canonical `radio.conf` reference in
+  [`34-Userdata/README.md`](34-Userdata/README.md#radioconf-keys-full-reference);
+  per-firmware READMEs in `24-NCP`, `25-RCP`, `26-OT-RCP`,
+  `27-Router`; kernel-driver `README.md` / `DESIGN.md` /
+  `SECURITY.md`; migration guide).
+- `23-Bootloader-UART-Xmodem/firmware/README.md` — drop the dead
+  link to the unshipped Stage-2-only `.s37` (`*.s37` is gitignored
+  except the `-combined.s37` artefact); restored a green
+  `mkdocs --strict` CI build.
+
+---
+
 ## [3.1.0] - 2026-04-26
 
 EFR32 radio recovery and a rock-solid `flash_efr32.sh`. The kernel

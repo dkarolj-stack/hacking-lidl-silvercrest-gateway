@@ -116,9 +116,8 @@ The script handles everything automatically since v3.1: pulses `nRST`
 for a clean chip state, installs `universal-silabs-flasher` in a venv if
 needed, switches the in-kernel UART bridge to flash mode
 (`flow_control=0`) via SSH, flashes the selected firmware, writes the
-matching chip identity (`FIRMWARE`, `FIRMWARE_VERSION`,
-`FIRMWARE_BAUD`) and daemon-routing keys (`MODE`,
-`BRIDGE_BAUD`/`OTBR_BAUD`) to `/userdata/etc/radio.conf` so init
+matching chip identity (`FIRMWARE`, `FIRMWARE_VERSION`, `FIRMWARE_BAUD`)
+and daemon-routing key (`MODE`) to `/userdata/etc/radio.conf` so init
 scripts arm correctly on next boot AND a future reader can tell what's
 on the chip without probing it, then reboots. See
 [`3-Main-SoC-Realtek-RTL8196E/34-Userdata/README.md`](../../3-Main-SoC-Realtek-RTL8196E/34-Userdata/README.md#radioconf-keys-full-reference)

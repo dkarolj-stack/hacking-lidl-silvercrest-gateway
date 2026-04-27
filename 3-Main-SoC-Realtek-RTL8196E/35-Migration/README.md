@@ -61,7 +61,6 @@ v2.x default state in the new userdata:
 ```
 FIRMWARE=ncp
 FIRMWARE_BAUD=115200
-BRIDGE_BAUD=115200
 ```
 
 This is right for the vast majority of v2.x installs (NCP-UART-HW @
@@ -79,30 +78,28 @@ ssh root@192.168.1.88 'cat > /userdata/etc/radio.conf <<EOF
 FIRMWARE=otrcp
 FIRMWARE_BAUD=115200
 MODE=otbr
-OTBR_BAUD=115200
 EOF'
 
 # RCP @ 115200 (Multi-PAN, v2.x)
 ssh root@192.168.1.88 'cat > /userdata/etc/radio.conf <<EOF
 FIRMWARE=rcp
 FIRMWARE_BAUD=115200
-BRIDGE_BAUD=115200
 EOF'
 
 # NCP at a non-default baud you built yourself
 ssh root@192.168.1.88 'cat > /userdata/etc/radio.conf <<EOF
 FIRMWARE=ncp
 FIRMWARE_BAUD=460800
-BRIDGE_BAUD=460800
 EOF'
 ```
 
-**v3.0 → v3.x** : `radio.conf` already exists on v3.0 (with at least
-`BRIDGE_BAUD` or `MODE`/`OTBR_BAUD`); it's preserved as-is. The
-chip-identity keys (`FIRMWARE`, `FIRMWARE_VERSION`, `FIRMWARE_BAUD`)
-won't be present until the next `flash_efr32.sh` invocation rewrites
-them. Optional: complete the file by hand to get the chip identity
-visible immediately, using the same recipes above.
+**v3.0 → v3.2+** : `radio.conf` already exists on v3.0/v3.1 (with at
+least `BRIDGE_BAUD` or `MODE`/`OTBR_BAUD`); it's preserved as-is. The
+init scripts in v3.2+ read the canonical `FIRMWARE_BAUD` first and fall
+back to the legacy `BRIDGE_BAUD`/`OTBR_BAUD` if it's absent, so old
+configs keep working unchanged. The next `flash_efr32.sh` invocation
+strips the legacy keys and writes only `FIRMWARE_BAUD`. Optional: tidy
+up by hand using the recipes above.
 
 ### `build_fullflash.sh` — Build the flash image
 
@@ -165,16 +162,16 @@ The script:
 2. Installs `universal-silabs-flasher` in a venv if needed (auto-reinstalls if probe-methods patch changes)
 3. SSHes into the gateway, stops radio daemons, switches the in-kernel UART bridge to flash mode (`flow_control=0`)
 4. Probes the running app (or the Gecko Bootloader if the chip is already there), flashes the selected firmware via EZSP/CPC/Spinel + Xmodem over `socket://IP:8888`
-5. Writes the matching chip identity (`FIRMWARE`, `FIRMWARE_VERSION`, `FIRMWARE_BAUD`) and daemon-routing keys (`MODE`, `BRIDGE_BAUD`/`OTBR_BAUD`) to `/userdata/etc/radio.conf` so init scripts arm correctly on next boot AND a future reader can tell what's on the chip without probing
+5. Writes the chip identity (`FIRMWARE`, `FIRMWARE_VERSION`, `FIRMWARE_BAUD`) and daemon-routing key (`MODE`) to `/userdata/etc/radio.conf` so init scripts arm correctly on next boot AND a future reader can tell what's on the chip without probing
 6. Reboots the gateway
 
 | Firmware | Location | Description | `radio.conf` after flash |
 |----------|----------|-------------|--------------------------|
 | `bootloader-uart-xmodem-2.4.2.gbl` | `23-Bootloader-UART-Xmodem/firmware/` | Gecko Bootloader stage 2 | unchanged (bootloader update doesn't change the app slot) |
-| `ncp-uart-hw-<EmberVersion>-<BAUD>.gbl` | `24-NCP-UART-HW/firmware/` | Zigbee NCP for Z2M / ZHA (EZSP) | `FIRMWARE=ncp` + `FIRMWARE_VERSION=<v>` + `FIRMWARE_BAUD=<BAUD>` + `BRIDGE_BAUD=<BAUD>` |
-| `rcp-uart-802154-<BAUD>.gbl` | `25-RCP-UART-HW/firmware/` | Multi-PAN RCP for Z2M (EmberZNet 8.x via cpcd) | `FIRMWARE=rcp` + `FIRMWARE_BAUD=<BAUD>` + `BRIDGE_BAUD=<BAUD>` |
-| `ot-rcp-<BAUD>.gbl` | `26-OT-RCP/firmware/` | OpenThread RCP — 3 use cases via `radio.conf` | `FIRMWARE=otrcp` + `FIRMWARE_BAUD=<BAUD>` + `MODE=otbr` + `OTBR_BAUD=<BAUD>` (case 3 default; edit `MODE`/`BRIDGE_BAUD` for cases 1/2) |
-| `z3-router-<EmberVersion>-<BAUD>.gbl` | `27-Router/firmware/` | Zigbee 3.0 standalone router | `FIRMWARE=router` + `FIRMWARE_VERSION=<v>` + `FIRMWARE_BAUD=115200` + `BRIDGE_BAUD=115200` |
+| `ncp-uart-hw-<EmberVersion>-<BAUD>.gbl` | `24-NCP-UART-HW/firmware/` | Zigbee NCP for Z2M / ZHA (EZSP) | `FIRMWARE=ncp` + `FIRMWARE_VERSION=<v>` + `FIRMWARE_BAUD=<BAUD>` |
+| `rcp-uart-802154-<BAUD>.gbl` | `25-RCP-UART-HW/firmware/` | Multi-PAN RCP for Z2M (EmberZNet 8.x via cpcd) | `FIRMWARE=rcp` + `FIRMWARE_BAUD=<BAUD>` |
+| `ot-rcp-<BAUD>.gbl` | `26-OT-RCP/firmware/` | OpenThread RCP — 3 use cases via `radio.conf` | `FIRMWARE=otrcp` + `FIRMWARE_BAUD=<BAUD>` + `MODE=otbr` (case 3 default; remove `MODE` for cases 1/2) |
+| `z3-router-<EmberVersion>-<BAUD>.gbl` | `27-Router/firmware/` | Zigbee 3.0 standalone router | `FIRMWARE=router` + `FIRMWARE_VERSION=<v>` + `FIRMWARE_BAUD=115200` |
 
 > Pre-built GBL filenames embed the EmberZNet version (where applicable) and
 > the UART baud. `flash_efr32.sh` resolves the right file via a glob, so

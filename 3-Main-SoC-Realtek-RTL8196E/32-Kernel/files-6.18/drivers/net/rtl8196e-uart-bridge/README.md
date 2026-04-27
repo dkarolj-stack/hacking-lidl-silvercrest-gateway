@@ -66,7 +66,7 @@ is the normal entry point. It reads two keys from
 `/userdata/etc/radio.conf`:
 
 ```
-BRIDGE_BAUD=115200   # or 460800, 691200, 892857 — match the EFR32 firmware
+FIRMWARE_BAUD=115200 # or 460800, 691200, 892857 — match the EFR32 firmware
 BRIDGE_BIND=0.0.0.0  # or 127.0.0.1 to force SSH-tunnel-only access
 ```
 
@@ -74,14 +74,16 @@ then writes the corresponding sysfs knobs and flips `enable=1`. When
 `MODE=otbr` is set in the same file, the script exits early and leaves
 the UART free for `otbr-agent`.
 
-Both keys are optional — missing `BRIDGE_BAUD` defaults to 460800,
+Both keys are optional — missing `FIRMWARE_BAUD` defaults to 460800,
 missing `BRIDGE_BIND` defaults to 0.0.0.0 (unchanged from v3.0
 behaviour).
 
-`radio.conf` may also carry chip-identity keys (`FIRMWARE`,
-`FIRMWARE_VERSION`, `FIRMWARE_BAUD`, written by `flash_efr32.sh`) and
-the `OTBR_BAUD` key consumed by `S70otbr`. The kernel driver itself
-reads none of those — they are operator-facing metadata, see
+`FIRMWARE_BAUD` is the chip-side baud written by `flash_efr32.sh` on
+every successful flash; both `S50uart_bridge` (Zigbee) and `S70otbr`
+(OTBR) read this same key, since a working UART link forces both ends
+to the same baud. `radio.conf` may also carry the related chip-identity
+keys (`FIRMWARE`, `FIRMWARE_VERSION`). The kernel driver itself reads
+none of those — they are operator-facing metadata, see
 [`34-Userdata/README.md`](../../../../../34-Userdata/README.md#radioconf-keys-full-reference)
 for the full reference.
 

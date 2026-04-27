@@ -67,7 +67,7 @@ Edit `/userdata/etc/radio.conf` on the gateway:
 
 ```
 BRIDGE_BIND=127.0.0.1
-BRIDGE_BAUD=115200      # or whatever baud your NCP firmware is built at
+FIRMWARE_BAUD=115200    # or whatever baud your NCP firmware is built at
 ```
 
 Then restart the bridge init script so it re-reads `radio.conf` and

@@ -114,7 +114,7 @@ until an init script — `S50uart_bridge` in the userdata overlay —
 writes `enable=1` once `/dev/ttyS1` is known to exist. This avoids
 the auto-arm race where the bridge would try to open the tty before
 the 8250 driver had created the device node. The init script also
-pulls `BRIDGE_BAUD` and `BRIDGE_BIND` from `/userdata/etc/radio.conf`
+pulls `FIRMWARE_BAUD` and `BRIDGE_BIND` from `/userdata/etc/radio.conf`
 before arming, so the operator's persistent choices land on every
 boot without a second tool.
 

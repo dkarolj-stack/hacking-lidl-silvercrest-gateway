@@ -4,6 +4,37 @@ All notable changes to the EFR32 firmware and tooling are documented here.
 
 ---
 
+## [3.1.1] - 2026-04-27
+
+Companion entry to the [v3.1.1 RTL8196E
+release](../3-Main-SoC-Realtek-RTL8196E/CHANGELOG.md#311---2026-04-27)
+— the heavy lifting (kernel UART-bridge hardening,
+`flash_efr32.sh` TCP-client safety check, `radio.conf`
+simplification) lives there. EFR32 side has only documentation
+cleanups in this cycle.
+
+### Documentation
+
+- `23-Bootloader-UART-Xmodem/firmware/README.md` — drop the dead
+  link to the unshipped Stage-2-only
+  `bootloader-uart-xmodem-2.4.2.s37` (`*.s37` is gitignored except
+  the `-combined.s37` artefact, see commit `7d67772`); replaced with
+  a "build it locally" pointer. Restored a green `mkdocs --strict`
+  CI build.
+- Per-firmware READMEs (`24-NCP`, `25-RCP`, `26-OT-RCP`, `27-Router`)
+  + the top-level `README.md` updated for the new single-key
+  `radio.conf` model: `FIRMWARE_BAUD` is now the canonical baud
+  reference (chip-side = host-side, since both ends of the UART
+  link must agree). Legacy `BRIDGE_BAUD` / `OTBR_BAUD` references
+  removed from user-facing prose; `flash_efr32.sh` stops emitting
+  them and strips them from existing configs on every flash.
+- `26-OT-RCP/docker/README.md` — three-case switching recipe
+  (ZoH / OTBR-host / OTBR-gateway) collapses to a one-line `sed`
+  flipping `MODE=otbr` on/off; no more `BRIDGE_BAUD` ↔ `OTBR_BAUD`
+  swap.
+
+---
+
 ## [3.1.0] - 2026-04-26
 
 Build matrix and documentation pass. Each per-firmware `build_*.sh`

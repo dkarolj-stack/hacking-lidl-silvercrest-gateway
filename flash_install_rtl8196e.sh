@@ -129,6 +129,28 @@ if [ "${#missing_pkgs[@]}" -gt 0 ]; then
     exit 1
 fi
 
+# Resolve IFACE for BOOT_IP and require L2 reachability — the bootloader's TFTP
+# server only answers on the same L2 segment. Sets IFACE on success; exits with
+# an actionable hint when the host has no interface in the bootloader's subnet.
+require_boot_l2() {
+    IFACE="$(ip route get "$BOOT_IP" 2>/dev/null \
+        | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')"
+    if [ -z "${IFACE:-}" ]; then
+        echo "Error: cannot determine outgoing interface to ${BOOT_IP}." >&2
+        exit 1
+    fi
+    if ip route get "$BOOT_IP" 2>/dev/null | grep -qE '\svia\s'; then
+        echo "Error: ${BOOT_IP} is reached via a gateway (routed). The bootloader's" >&2
+        echo "TFTP server only answers on the same L2 segment." >&2
+        echo "" >&2
+        echo "Add a secondary address on the interface that faces the gateway, e.g.:" >&2
+        echo "    sudo ip addr add 192.168.1.10/24 dev <iface>" >&2
+        echo "" >&2
+        echo "Then re-run this script. Remove the address afterwards with 'ip addr del'." >&2
+        exit 1
+    fi
+}
+
 
 # --- detect gateway state (early — fail fast before building) ----------------
 # If LINUX_IP is provided, probe SSH to determine firmware type and save config.
@@ -140,16 +162,10 @@ echo "  FIRMWARE INSTALLATION"
 echo "========================================="
 echo ""
 
-echo "Checking for bootloader at ${BOOT_IP}..."
-
-IFACE="$(ip route get "$BOOT_IP" 2>/dev/null \
-    | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')"
-if [ -z "${IFACE:-}" ]; then
-    echo "Error: cannot determine outgoing interface to ${BOOT_IP}." >&2
-    exit 1
-fi
-
-# Detect gateway state based on whether LINUX_IP was provided
+# Detect gateway state based on whether LINUX_IP was provided.
+# BOOT_IP L2 reachability is enforced lazily — at boothold time on the upgrade
+# path, immediately on the bootloader path — so backup-via-SSH still works
+# from a routed network where the host has no 192.168.1.0/24 interface yet.
 LINUX_RUNNING=""
 if [ -n "$LINUX_IP" ]; then
     echo "Probing SSH on ${LINUX_IP}..."
@@ -270,9 +286,14 @@ if [ -n "$LINUX_RUNNING" ]; then
             cat > "${SKEL_WORK}/etc/radio.conf" <<EOF
 FIRMWARE=ncp
 FIRMWARE_BAUD=115200
-BRIDGE_BAUD=115200
 EOF
         fi
+
+        # Confirm the host can TFTP to the bootloader before tipping the
+        # gateway into bootloader mode — failing after boothold leaves the
+        # gateway stranded at 192.168.1.6 with the user scrambling to fix
+        # their network mid-flow.
+        require_boot_l2
 
         echo "Sending boothold + reboot..."
         ssh_retry "${FI_SSH_OPTS[@]}" "$FI_SSH_TARGET" "boothold && reboot" 2>/dev/null || true
@@ -325,6 +346,8 @@ EOF
     fi
 else
     # No LINUX_IP given — check if bootloader is reachable via ARP
+    echo "Checking for bootloader at ${BOOT_IP}..."
+    require_boot_l2
     ip neigh del "$BOOT_IP" dev "$IFACE" 2>/dev/null || true
     bash -c "echo -n X >/dev/udp/$BOOT_IP/69" 2>/dev/null || true
     sleep 0.3

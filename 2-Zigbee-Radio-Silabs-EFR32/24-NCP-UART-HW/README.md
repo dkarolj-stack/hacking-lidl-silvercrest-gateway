@@ -39,7 +39,7 @@ repository root:
 
 The script handles everything: pulse `nRST` for a clean chip state, switch
 the in-kernel UART bridge to flash mode, run the Xmodem upload, write the
-matching `BRIDGE_BAUD=<baud>` to `/userdata/etc/radio.conf` so the bridge
+matching `FIRMWARE_BAUD=<baud>` to `/userdata/etc/radio.conf` so the bridge
 arms at the right speed on next boot, then reboot.
 
 Supported NCP bauds (pre-built GBLs): 115200, 230400, 460800, 691200, 892857.
@@ -59,15 +59,15 @@ the gateway-side init scripts arm the bridge correctly on next boot. For
 NCP at baud `<B>`:
 
 ```
-FIRMWARE=ncp           # what's in the EFR32 application slot (v3.2+)
-FIRMWARE_VERSION=7.5.1 # EmberZNet version embedded in the GBL (v3.2+)
-FIRMWARE_BAUD=<B>      # the chip's UART baud (v3.2+)
-BRIDGE_BAUD=<B>        # consumed by S50uart_bridge → arms TCP:8888 at <B>
-                       # (no MODE= line; otbr-agent stays off)
+FIRMWARE=ncp           # what's in the EFR32 application slot
+FIRMWARE_VERSION=7.5.1 # EmberZNet version embedded in the GBL
+FIRMWARE_BAUD=<B>      # chip-side UART baud — S50uart_bridge reads this and
+                       # arms TCP:8888 at <B> (no MODE= line; otbr-agent off)
 ```
 
-The `FIRMWARE*` keys are informational (humans / future scripts);
-`BRIDGE_BAUD` is what `S50uart_bridge` reads at boot. See
+`FIRMWARE_BAUD` is the single source of truth (chip-side baud =
+host-side baud, since both ends of the UART link must agree); the
+`FIRMWARE*` companion keys are informational. See
 [`3-Main-SoC-Realtek-RTL8196E/34-Userdata/README.md`](../../3-Main-SoC-Realtek-RTL8196E/34-Userdata/README.md#radioconf-keys-full-reference)
 for the full key reference.
 
@@ -200,7 +200,7 @@ for the math behind 892857.
 # 1. Build the GBL at the desired baud
 cd 2-Zigbee-Radio-Silabs-EFR32/24-NCP-UART-HW && ./build_ncp.sh 460800
 
-# 2. Flash — radio.conf BRIDGE_BAUD is updated automatically
+# 2. Flash — radio.conf FIRMWARE_BAUD is updated automatically
 ./flash_efr32.sh -y ncp 460800
 ```
 

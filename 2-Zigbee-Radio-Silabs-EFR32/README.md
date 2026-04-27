@@ -75,11 +75,11 @@ and at what baud, so the right init script wakes up at boot:
 EFR32 firmware (.gbl)        radio.conf daemon-routing keys   init script        What runs
                               on RTL8196E                      starts at boot     on /dev/ttyS1
 ─────────────────────────    ──────────────────────────────   ───────────────   ────────────────
-NCP                          BRIDGE_BAUD=<B>                  S50uart_bridge    bridge TCP:8888
-RCP                          BRIDGE_BAUD=<B>                  S50uart_bridge    bridge TCP:8888
-OT-RCP (case 3, default)     MODE=otbr + OTBR_BAUD=460800     S70otbr           otbr-agent (native)
-OT-RCP (cases 1 & 2)         BRIDGE_BAUD=460800               S50uart_bridge    bridge TCP:8888
-Router                       BRIDGE_BAUD=115200               S50uart_bridge    bridge TCP:8888
+NCP                          FIRMWARE_BAUD=<B>                S50uart_bridge    bridge TCP:8888
+RCP                          FIRMWARE_BAUD=<B>                S50uart_bridge    bridge TCP:8888
+OT-RCP (case 3, default)     FIRMWARE_BAUD=<B> + MODE=otbr    S70otbr           otbr-agent (native)
+OT-RCP (cases 1 & 2)         FIRMWARE_BAUD=<B> (no MODE)      S50uart_bridge    bridge TCP:8888
+Router                       FIRMWARE_BAUD=115200             S50uart_bridge    bridge TCP:8888
 ```
 
 The repo-root `flash_efr32.sh` writes the right `radio.conf` keys
@@ -88,10 +88,10 @@ The repo-root `flash_efr32.sh` writes the right `radio.conf` keys
 editing `radio.conf` after the flash (see
 [`26-OT-RCP/docker/README.md`](./26-OT-RCP/docker/README.md#switching-radio-mode-no-efr32-reflash-needed)).
 
-Since v3.2 the script also writes informational keys describing the
-chip-side identity (`FIRMWARE`, `FIRMWARE_VERSION`, `FIRMWARE_BAUD`)
-so a `cat /userdata/etc/radio.conf` tells you exactly what's on the
-chip without an `universal-silabs-flasher probe`. See
+The script also writes informational keys describing the chip-side
+identity (`FIRMWARE`, `FIRMWARE_VERSION`) so a `cat /userdata/etc/radio.conf`
+tells you exactly what's on the chip without an
+`universal-silabs-flasher probe`. See
 [`3-Main-SoC-Realtek-RTL8196E/34-Userdata/README.md`](../3-Main-SoC-Realtek-RTL8196E/34-Userdata/README.md#radioconf-keys-full-reference)
 for the full key reference.
 
@@ -105,5 +105,4 @@ the keys are:
 | Key | Read by | Purpose |
 |---|---|---|
 | `MODE=otbr` | `S50uart_bridge`, `S70otbr` | Switches ttyS1 ownership: present → `S70otbr` runs `otbr-agent`; absent → `S50uart_bridge` arms the TCP bridge |
-| `BRIDGE_BAUD=<baud>` | `S50uart_bridge` | UART baud the bridge arms at (`MODE != otbr` only) |
-| `OTBR_BAUD=<baud>` | `S70otbr` | UART baud `otbr-agent` opens `/dev/ttyS1` at (v3.1+; default 460800 if absent) |
+| `FIRMWARE_BAUD=<baud>` | `S50uart_bridge`, `S70otbr` | UART baud both daemons open `/dev/ttyS1` at — single source of truth, set by `flash_efr32.sh` (default 460800 if absent) |

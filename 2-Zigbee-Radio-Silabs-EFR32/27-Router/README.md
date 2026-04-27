@@ -40,7 +40,7 @@ repository root:
 The script handles everything: pulse `nRST` for a clean chip state, send
 the router's `bootloader reboot` CLI command (the router firmware doesn't
 speak EZSP/CPC/Spinel — entry to the bootloader goes via its mini-CLI),
-upload the new firmware, then write `BRIDGE_BAUD=115200` to
+upload the new firmware, then write `FIRMWARE_BAUD=115200` to
 `/userdata/etc/radio.conf` so the bridge auto-arms at the router CLI baud
 on next boot — meaning you can reach the [mini-CLI](#mini-cli-for-bootloader-and-network-management)
 via `nc 192.168.1.88 8888` immediately after reboot.
@@ -59,15 +59,15 @@ The router firmware runs autonomously — no host application needed.
 `flash_efr32.sh` writes to `/userdata/etc/radio.conf`:
 
 ```
-FIRMWARE=router        # what's in the EFR32 application slot (v3.2+)
-FIRMWARE_VERSION=7.5.1 # EmberZNet version embedded in the GBL (v3.2+)
-FIRMWARE_BAUD=115200   # the chip's UART baud (v3.2+)
-BRIDGE_BAUD=115200     # consumed by S50uart_bridge → arms TCP:8888 at 115200
-                       # (no MODE= line; otbr-agent stays off)
+FIRMWARE=router        # what's in the EFR32 application slot
+FIRMWARE_VERSION=7.5.1 # EmberZNet version embedded in the GBL
+FIRMWARE_BAUD=115200   # chip-side UART baud — S50uart_bridge reads this and
+                       # arms TCP:8888 at 115200 (no MODE= line; otbr-agent off)
 ```
 
-The `FIRMWARE*` keys are informational; `BRIDGE_BAUD` is what
-`S50uart_bridge` reads at boot. See
+`FIRMWARE_BAUD` is the single source of truth (chip-side baud =
+host-side baud, since both ends of the UART link must agree); the
+`FIRMWARE*` companion keys are informational. See
 [`3-Main-SoC-Realtek-RTL8196E/34-Userdata/README.md`](../../3-Main-SoC-Realtek-RTL8196E/34-Userdata/README.md#radioconf-keys-full-reference)
 for the full key reference.
 

@@ -410,8 +410,42 @@ echo "Connecting to ${GW_IP} — detecting configuration..."
 # Remote shell emits structured KEY=VALUE lines (one per line). Local
 # parsing is then trivial via grep, no fragile suffix-matching. Any
 # stderr/non-KEY=VALUE noise from `set -u` etc. is tolerated.
-DETECT_OUT=$(ssh_gw "BRIDGE_SYSFS='$BRIDGE_SYSFS' sh -s" <<'REMOTE_EOF'
+DETECT_OUT=$(ssh_gw "BRIDGE_SYSFS='$BRIDGE_SYSFS' BRIDGE_PORT='$GW_PORT' sh -s" <<'REMOTE_EOF'
 emit() { echo "$1=$2"; }
+
+# bridge_active_peer: prints "IP:PORT" if a TCP client has an ESTABLISHED
+# connection to the bridge port, empty otherwise. Reads /proc/net/tcp on
+# the gateway so it sees clients regardless of where they live (the
+# gateway itself, the host running flash_efr32.sh, or a third box like a
+# Pi/NAS running zigbee2mqtt).
+# RTL8196E is little-endian — IP fields in /proc/net/tcp are byte-reversed.
+bridge_active_peer() {
+    PORT_HEX=$(printf '%04X' "$BRIDGE_PORT")
+    awk -v ph="$PORT_HEX" '
+        BEGIN {
+            for (i = 0; i < 10; i++) hv[i] = i
+            hv["A"]=10; hv["B"]=11; hv["C"]=12; hv["D"]=13; hv["E"]=14; hv["F"]=15
+            hv["a"]=10; hv["b"]=11; hv["c"]=12; hv["d"]=13; hv["e"]=14; hv["f"]=15
+        }
+        function h2d(s,    n, i) {
+            n = 0
+            for (i = 1; i <= length(s); i++) n = n * 16 + hv[substr(s, i, 1)]
+            return n
+        }
+        NR == 1 { next }
+        $4 != "01" { next }
+        {
+            split($2, lp, ":")
+            if (lp[2] != ph) next
+            split($3, rp, ":")
+            printf "%d.%d.%d.%d:%d",
+                h2d(substr(rp[1], 7, 2)), h2d(substr(rp[1], 5, 2)),
+                h2d(substr(rp[1], 3, 2)), h2d(substr(rp[1], 1, 2)),
+                h2d(rp[2])
+            exit
+        }
+    ' /proc/net/tcp 2>/dev/null
+}
 
 # Bridge present? (kernel 6.18 with CONFIG_RTL8196E_UART_BRIDGE=y)
 if [ ! -d "$BRIDGE_SYSFS" ]; then
@@ -423,10 +457,10 @@ fi
 #   Zigbee : S50uart_bridge arms the bridge at boot
 #   OTBR   : otbr-agent (started by S70otbr) holds ttyS1; bridge disarmed
 MODE=zigbee
-BRIDGE_BAUD_CFG=
+FIRMWARE_BAUD_CFG=
 if [ -f /userdata/etc/radio.conf ]; then
     grep -q '^MODE=otbr' /userdata/etc/radio.conf && MODE=otbr
-    BRIDGE_BAUD_CFG=$(grep '^BRIDGE_BAUD=' /userdata/etc/radio.conf | cut -d= -f2)
+    FIRMWARE_BAUD_CFG=$(grep '^FIRMWARE_BAUD=' /userdata/etc/radio.conf | cut -d= -f2)
 fi
 emit MODE "$MODE"
 
@@ -445,7 +479,7 @@ if [ "$ARMED" != '1' ]; then
         # flow_control=1 because Spinel/HDLC at 460800 needs RTS/CTS for
         # probe reliability — dropped to 0 lower down once USF moves the
         # EFR32 into the Gecko Bootloader.
-        BAUD=${BRIDGE_BAUD_CFG:-460800}
+        BAUD=${FIRMWARE_BAUD_CFG:-460800}
         echo "$BAUD" > "$BRIDGE_SYSFS/baud"
         echo 1 > "$BRIDGE_SYSFS/flow_control"
         echo 1 > "$BRIDGE_SYSFS/enable"
@@ -459,6 +493,7 @@ if [ "$ARMED" != '1' ]; then
         emit BAUD "$BAUD"
         emit ARMED "$ARMED"
         emit SELF_ARMED "$SELF_ARMED"
+        emit PEER "$(bridge_active_peer)"
         emit STATUS ok
         exit 0
     fi
@@ -472,6 +507,7 @@ BAUD=$(cat "$BRIDGE_SYSFS/baud" 2>/dev/null || echo 115200)
 emit BAUD "$BAUD"
 emit ARMED "$ARMED"
 emit SELF_ARMED "$SELF_ARMED"
+emit PEER "$(bridge_active_peer)"
 emit STATUS ok
 REMOTE_EOF
 )
@@ -489,6 +525,7 @@ DETECT_STATUS=$(detect_get STATUS)
 RADIO_MODE=$(detect_get MODE)
 CURRENT_BAUD=$(detect_get BAUD)
 SELF_ARMED=$(detect_get SELF_ARMED)
+PEER=$(detect_get PEER)
 
 case "$DETECT_STATUS" in
     ok) ;;
@@ -518,6 +555,17 @@ case "$DETECT_STATUS" in
         exit 1
         ;;
 esac
+
+# Refuse to flash if another TCP client is already attached. The bridge
+# silently replaces clients (rtl8196e_uart_bridge_main.c "replacing
+# previous client"), which would kick a running Z2M / ZHA / otbr-agent
+# on any host and let it fight USF for the socket. Up to the user to
+# stop it on the right machine — we only report where it lives.
+if [ -n "$PEER" ]; then
+    echo "Error: TCP:${GW_PORT} on ${GW_IP} already has an active client (${PEER})." >&2
+    echo "Stop the zigbee2mqtt / ZHA / otbr-agent talking to the gateway, then re-run." >&2
+    exit 1
+fi
 
 # Defaults if a field is somehow empty (shouldn't happen; defensive).
 RADIO_MODE="${RADIO_MODE:-zigbee}"
@@ -823,7 +871,7 @@ else
         echo "    needs J-Link recovery (header J1, see 22-Backup-Flash-Restore/)." >&2
         echo "  * The chip is running an exotic firmware at a non-115200 baud" >&2
         echo "    not described by /userdata/etc/radio.conf — fix radio.conf" >&2
-        echo "    BRIDGE_BAUD (or OTBR_BAUD) by hand and retry." >&2
+        echo "    FIRMWARE_BAUD by hand and retry." >&2
         exit 1
     fi
 fi
@@ -884,25 +932,26 @@ fi
 #   FIRMWARE_VERSION=<ver>   — when the GBL filename embeds it (NCP, Router).
 #                              Absent for RCP/OT-RCP — version is host-side
 #                              (zigbeed for RCP, ot-br-posix for OT-RCP).
-#   FIRMWARE_BAUD=<baud>     — the chip's UART baud, set at flash time.
-#                              Source of truth for "what speed does the chip
-#                              expect"; BRIDGE_BAUD/OTBR_BAUD normally match.
+#   FIRMWARE_BAUD=<baud>     — the chip's UART baud, set at flash time. Single
+#                              source of truth: S50uart_bridge / S70otbr both
+#                              read this (working link forces both ends equal).
 #   BOOTLOADER_VERSION=<ver> — Gecko Bootloader Stage-2 version reported by
 #                              USF during the flash (e.g. '2.4.2'). Updated
 #                              on EVERY successful flash (USF transits the
 #                              bootloader to upload the GBL — bootloader-only
 #                              AND app flashes both refresh this).
 #   MODE=otbr                — drives OTBR vs Zigbee path (set when fw=OT-RCP).
-#   BRIDGE_BAUD=<baud>       — read by S50uart_bridge at boot (Zigbee path).
-#   OTBR_BAUD=<baud>         — read by S70otbr at boot (OTBR path; v3.1+).
 #
 # Per-firmware mapping:
 #   1 (Bootloader)  → don't touch radio.conf (we only updated the bootloader,
 #                     not the application; existing config still applies)
-#   2 (NCP)         → FIRMWARE=ncp + FIRMWARE_VERSION=<v> + BRIDGE_BAUD=<fw_baud>
-#   3 (RCP)         → FIRMWARE=rcp + BRIDGE_BAUD=<fw_baud>
-#   4 (OT-RCP)      → FIRMWARE=otrcp + MODE=otbr + OTBR_BAUD=<fw_baud>
-#   5 (Router)      → FIRMWARE=router + FIRMWARE_VERSION=<v> + BRIDGE_BAUD=<fw_baud>
+#   2 (NCP)         → FIRMWARE=ncp + FIRMWARE_VERSION=<v> + FIRMWARE_BAUD=<v>
+#   3 (RCP)         → FIRMWARE=rcp + FIRMWARE_BAUD=<v>
+#   4 (OT-RCP)      → FIRMWARE=otrcp + FIRMWARE_BAUD=<v> + MODE=otbr
+#   5 (Router)      → FIRMWARE=router + FIRMWARE_VERSION=<v> + FIRMWARE_BAUD=<v>
+#
+# Legacy host-side keys (BRIDGE_BAUD, OTBR_BAUD) are stripped on every flash
+# so old configs converge on the single FIRMWARE_BAUD truth.
 
 # Extract FIRMWARE_VERSION from the GBL filename when it embeds one
 # (currently NCP and Router: ncp-uart-hw-7.5.1-460800.gbl, z3-router-7.5.1-115200.gbl).
@@ -920,8 +969,6 @@ case "$fw_choice" in
         FIRMWARE_NAME=
         FIRMWARE_VER=
         MODE_LINE=
-        BAUD_KEY=
-        BAUD_VALUE=
         DAEMON_MSG="(no daemon change — bootloader-only flash)"
         ORIG_BAUD="$CURRENT_BAUD"
         ;;
@@ -929,8 +976,6 @@ case "$fw_choice" in
         FIRMWARE_NAME=otrcp
         FIRMWARE_VER=
         MODE_LINE=MODE=otbr
-        BAUD_KEY=OTBR_BAUD
-        BAUD_VALUE="$fw_baud"
         DAEMON_MSG="otbr-agent (S70otbr) at ${fw_baud} baud"
         ORIG_BAUD="$fw_baud"
         ;;
@@ -938,8 +983,6 @@ case "$fw_choice" in
         FIRMWARE_NAME=rcp
         FIRMWARE_VER=
         MODE_LINE=
-        BAUD_KEY=BRIDGE_BAUD
-        BAUD_VALUE="$fw_baud"
         DAEMON_MSG="in-kernel UART bridge on TCP:8888 at ${fw_baud} baud"
         ORIG_BAUD="$fw_baud"
         ;;
@@ -947,8 +990,6 @@ case "$fw_choice" in
         FIRMWARE_NAME=ncp
         FIRMWARE_VER="$FW_VERSION_DETECTED"
         MODE_LINE=
-        BAUD_KEY=BRIDGE_BAUD
-        BAUD_VALUE="$fw_baud"
         DAEMON_MSG="in-kernel UART bridge on TCP:8888 at ${fw_baud} baud"
         ORIG_BAUD="$fw_baud"
         ;;
@@ -956,17 +997,16 @@ case "$fw_choice" in
         FIRMWARE_NAME=router
         FIRMWARE_VER="$FW_VERSION_DETECTED"
         MODE_LINE=
-        BAUD_KEY=BRIDGE_BAUD
-        BAUD_VALUE="$fw_baud"
         DAEMON_MSG="in-kernel UART bridge on TCP:8888 at ${fw_baud} baud (router CLI)"
         ORIG_BAUD="$fw_baud"
         ;;
 esac
 
 # Persist FIRMWARE / FIRMWARE_VERSION / FIRMWARE_BAUD / BOOTLOADER_VERSION /
-# MODE / BRIDGE|OTBR_BAUD to /userdata/etc/radio.conf so init scripts arm
-# at the right speed on next boot AND a human / future script can tell what's
-# on the chip (both app slot AND Stage 2 bootloader) without probing.
+# MODE to /userdata/etc/radio.conf so init scripts arm at the right speed on
+# next boot AND a human / future script can tell what's on the chip (both app
+# slot AND Stage 2 bootloader) without probing. Legacy host-side keys
+# (BRIDGE_BAUD, OTBR_BAUD) are stripped here too so old configs converge.
 # Skipped for bootloader-only flash where FIRMWARE_NAME is empty (that path
 # writes only BOOTLOADER_VERSION earlier and exits).
 if [ -n "$FIRMWARE_NAME" ]; then
@@ -981,7 +1021,6 @@ if [ -n "$FIRMWARE_NAME" ]; then
             echo 'FIRMWARE_BAUD=${fw_baud}'
             [ -n '${BOOTLOADER_VERSION_DETECTED}' ] && echo 'BOOTLOADER_VERSION=${BOOTLOADER_VERSION_DETECTED}'
             [ -n '${MODE_LINE}' ] && echo '${MODE_LINE}'
-            echo '${BAUD_KEY}=${BAUD_VALUE}'
         } >> /userdata/etc/radio.conf
     " 2>/dev/null || true
 fi

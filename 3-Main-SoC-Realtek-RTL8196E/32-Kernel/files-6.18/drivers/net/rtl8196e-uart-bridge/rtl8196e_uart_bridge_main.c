@@ -53,6 +53,16 @@
 #define DRV_VERSION "1.0"
 
 static DEFINE_MUTEX(bridge_lock);
+/*
+ * Serializes nrst_pulse callers without blocking the UART->TCP hot path.
+ * Held only across the assert / msleep / release sequence in
+ * param_set_nrst_pulse(); bridge_lock is dropped before the msleep so
+ * bridge_port_receive_buf() can keep forwarding bytes to any TCP client
+ * still connected (the radio reset is expected to drop in-flight bytes
+ * on the wire, but it should not stall a concurrent stats reader or
+ * receive_buf invocation that holds no relation to the reset).
+ */
+static DEFINE_MUTEX(nrst_pulse_lock);
 
 /* ------------------------------------------------------------------ state */
 
@@ -61,6 +71,15 @@ static struct bridge_state {
 	struct socket      *listen_sock;
 	struct socket      *client_sock;
 	struct task_struct *worker;
+	/*
+	 * Snapshot of tty->port->client_ops captured at arm time, restored
+	 * verbatim at disarm. Today /dev/ttyS1 always carries
+	 * tty_port_default_client_ops, so the saved pointer is just the
+	 * default — but stashing it explicitly insulates the disarm path
+	 * from any future serdev/other layered consumer that might own
+	 * the port before us.
+	 */
+	const struct tty_port_client_operations *saved_client_ops;
 	bool                armed;
 	/*
 	 * Set under bridge_lock by disarm / reconfig_listen paths BEFORE they
@@ -246,7 +265,7 @@ static int bridge_worker_thread(void *data)
 
 	while (!kthread_should_stop()) {
 		struct socket *newsock = NULL;
-		int ret, last_recv = 0;
+		int ret, last_recv = 0, brightness;
 
 		/* ---- phase 1: accept ----
 		 * READ_ONCE: intentional lockless read. Lifecycle is protected
@@ -299,13 +318,15 @@ static int bridge_worker_thread(void *data)
 			}
 		}
 		state.client_sock = newsock;
+		brightness = clamp(rtl_status_led_brightness, 0, 255);
 		mutex_unlock(&bridge_lock);
 
 		/* Light the STATUS LED (clamped to 0-255). Idempotent: the
 		 * replace-client edge case above also lands here, so the LED
-		 * stays on across a client swap. */
-		led_trigger_event(bridge_led_trig,
-				  clamp(rtl_status_led_brightness, 0, 255));
+		 * stays on across a client swap. Brightness was snapshotted
+		 * under bridge_lock above so the sysfs setter (which holds
+		 * the same lock) cannot race with us mid-read. */
+		led_trigger_event(bridge_led_trig, brightness);
 
 		{
 			struct sockaddr_in peer;
@@ -554,14 +575,16 @@ static int bridge_arm_locked(void)
 		goto err_tty;
 	}
 
-	/* Install our port client_ops. This replaces the default
-	 * (tty_port_default_client_ops) which would forward bytes through
-	 * the ldisc layer; we want to bypass the ldisc entirely and take
-	 * the bytes directly from the flip buffer. Serdev does the same.
-	 * Writes to port->client_ops aren't synchronized by the core, so
-	 * we swap under tty_lock() to block any concurrent close path.
+	/* Install our port client_ops. This replaces the previous client_ops
+	 * (typically tty_port_default_client_ops, which would forward bytes
+	 * through the ldisc layer); we want to bypass the ldisc entirely
+	 * and take the bytes directly from the flip buffer. Serdev does the
+	 * same. Writes to port->client_ops aren't synchronized by the core,
+	 * so we swap under tty_lock() to block any concurrent close path.
+	 * The previous pointer is stashed so disarm restores it verbatim.
 	 */
 	tty_lock(tty);
+	state.saved_client_ops = tty->port->client_ops;
 	tty->port->client_ops = &bridge_port_client_ops;
 	tty_unlock(tty);
 
@@ -606,8 +629,9 @@ err_sock:
 	sock_release(ls);
 err_client_ops:
 	tty_lock(tty);
-	tty->port->client_ops = &tty_port_default_client_ops;
+	tty->port->client_ops = state.saved_client_ops;
 	tty_unlock(tty);
+	state.saved_client_ops = NULL;
 err_tty:
 	tty_lock(tty);
 	if (tty->ops->close)
@@ -685,8 +709,9 @@ static void bridge_disarm_locked(void)
 	 */
 	if (tty) {
 		tty_lock(tty);
-		tty->port->client_ops = &tty_port_default_client_ops;
+		tty->port->client_ops = state.saved_client_ops;
 		tty_unlock(tty);
+		state.saved_client_ops = NULL;
 	}
 
 	/* Shut down both sockets to unblock whatever the worker is doing
@@ -1136,6 +1161,10 @@ static int param_set_nrst_pulse(const char *val, const struct kernel_param *kp)
 	if (!trigger)
 		return 0;
 
+	/* Lazy syscon lookup under bridge_lock: bridge_syscon is published
+	 * exactly once and never reset, so callers reaching the pulse path
+	 * after the first successful lookup observe a stable pointer.
+	 */
 	mutex_lock(&bridge_lock);
 	if (!bridge_syscon) {
 		bridge_syscon = syscon_regmap_lookup_by_compatible("realtek,rtl819x-sysc");
@@ -1147,17 +1176,24 @@ static int param_set_nrst_pulse(const char *val, const struct kernel_param *kp)
 			return ret;
 		}
 	}
+	mutex_unlock(&bridge_lock);
 
+	/* Drop bridge_lock before msleep so the UART->TCP hot path
+	 * (bridge_port_receive_buf) and stats readers stay live during the
+	 * reset. nrst_pulse_lock keeps concurrent pulses from racing the
+	 * assert/release pair on the same syscon bits.
+	 */
+	mutex_lock(&nrst_pulse_lock);
 	pr_info(DRV_NAME ": nrst_pulse: asserting EFR32 nRST for 100 ms\n");
 	ret = regmap_update_bits(bridge_syscon, 0x44, 0x2480, 0x2480);
 	if (ret) {
-		mutex_unlock(&bridge_lock);
+		mutex_unlock(&nrst_pulse_lock);
 		pr_err(DRV_NAME ": nrst_pulse: assert failed (%d)\n", ret);
 		return ret;
 	}
 	msleep(100);
 	ret = regmap_update_bits(bridge_syscon, 0x44, 0x2480, 0x0000);
-	mutex_unlock(&bridge_lock);
+	mutex_unlock(&nrst_pulse_lock);
 	if (ret) {
 		pr_err(DRV_NAME ": nrst_pulse: release failed (%d)\n", ret);
 		return ret;
@@ -1203,6 +1239,45 @@ static const struct kernel_param_ops stats_ops = {
 	.get = param_get_stats,
 };
 
+/* status_led_brightness: brightness fired on the LED trigger when a TCP
+ * client connects. Read by the worker thread under bridge_lock (snapshot
+ * into a local before unlocking, see bridge_worker_thread); written by
+ * sysfs through the same lock here. Matches the locked-getter/setter
+ * pattern of every other live-tunable param in this driver.
+ */
+static int param_set_status_led_brightness(const char *val,
+					   const struct kernel_param *kp)
+{
+	int new_v, ret;
+
+	ret = kstrtoint(val, 0, &new_v);
+	if (ret)
+		return ret;
+	if (new_v < 0 || new_v > 255)
+		return -EINVAL;
+
+	mutex_lock(&bridge_lock);
+	rtl_status_led_brightness = new_v;
+	mutex_unlock(&bridge_lock);
+	return 0;
+}
+
+static int param_get_status_led_brightness(char *buffer,
+					   const struct kernel_param *kp)
+{
+	int v;
+
+	mutex_lock(&bridge_lock);
+	v = rtl_status_led_brightness;
+	mutex_unlock(&bridge_lock);
+	return scnprintf(buffer, PAGE_SIZE, "%d\n", v);
+}
+
+static const struct kernel_param_ops status_led_brightness_ops = {
+	.set = param_set_status_led_brightness,
+	.get = param_get_status_led_brightness,
+};
+
 module_param_cb(tty,       &tty_ops,    NULL, 0600);
 MODULE_PARM_DESC(tty,       "TTY device path (default /dev/ttyS1)");
 module_param_cb(baud,      &baud_ops,   NULL, 0644);
@@ -1223,7 +1298,7 @@ module_param_cb(nrst_pulse, &nrst_pulse_ops, NULL, 0200);
 MODULE_PARM_DESC(nrst_pulse,
 	"Write 1 to assert EFR32 nRST for 100 ms (recovers stuck radio "
 	"without rebooting SoC; see POST-MORTEM-bootloader-recovery.md)");
-module_param_named(status_led_brightness, rtl_status_led_brightness, int, 0644);
+module_param_cb(status_led_brightness, &status_led_brightness_ops, NULL, 0644);
 MODULE_PARM_DESC(status_led_brightness,
 	"Brightness 0-255 applied to the '" BRIDGE_LED_TRIG_NAME
 	"' LED trigger when a client is connected (default 255)");
@@ -1245,10 +1320,12 @@ static int __init rtl8196e_uart_bridge_init(void)
 /*
  * Built-in only: Kconfig declares CONFIG_RTL8196E_UART_BRIDGE as bool, not
  * tristate, so =m is rejected by the build system. This is intentional —
- * the hot path is expected to live in IRAM via the vmlinux.lds.S gather,
- * which only collects built-in .iram sections. late_initcall ensures we
- * run after tty/serial and net subsystems are ready; there is no matching
- * exit path because the driver is never unloaded.
+ * late_initcall ensures we run after tty/serial and net subsystems are
+ * ready, and there is no matching exit path because the driver is never
+ * unloaded. (An earlier scoping considered placing the hot path in IRAM,
+ * which would also have required a built-in build; that idea was shelved
+ * after measurements showed it unnecessary — see DESIGN.md "Options
+ * considered and dropped".)
  */
 late_initcall(rtl8196e_uart_bridge_init);
 

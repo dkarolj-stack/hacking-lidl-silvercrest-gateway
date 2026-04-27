@@ -5,8 +5,12 @@ Built firmware files for EFR32MG1B232F256GM48 (Lidl Silvercrest Gateway).
 ## Downloads (pre-built v2.4.2)
 
 - [`bootloader-uart-xmodem-2.4.2-combined.s37`](bootloader-uart-xmodem-2.4.2-combined.s37) — Stage 1 + Stage 2 combined (J-Link, full install)
-- [`bootloader-uart-xmodem-2.4.2.s37`](bootloader-uart-xmodem-2.4.2.s37) — Stage 2 only (J-Link, Silabs format)
 - [`bootloader-uart-xmodem-2.4.2.gbl`](bootloader-uart-xmodem-2.4.2.gbl) — Stage 2 in GBL (XMODEM upload)
+
+> The standalone Stage-2 `.s37` (Silabs format, J-Link-only) is not
+> shipped — the combined image above already covers the J-Link path.
+> Build it locally with `./build_bootloader.sh` if you specifically need
+> the Stage-2-only variant.
 
 ## File formats
 

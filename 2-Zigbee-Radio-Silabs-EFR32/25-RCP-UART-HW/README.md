@@ -77,7 +77,7 @@ repository root:
 
 The script handles everything: pulse `nRST` for a clean chip state, switch
 the in-kernel UART bridge to flash mode, run the Xmodem upload, write the
-matching `BRIDGE_BAUD=<baud>` to `/userdata/etc/radio.conf` so the bridge
+matching `FIRMWARE_BAUD=<baud>` to `/userdata/etc/radio.conf` so the bridge
 arms at the right speed on next boot, then reboot.
 
 Supported RCP bauds (pre-built GBLs): 115200, 230400, 460800.
@@ -96,10 +96,9 @@ so the gateway-side init scripts arm the bridge correctly on next boot.
 For RCP at baud `<B>`:
 
 ```
-FIRMWARE=rcp           # what's in the EFR32 application slot (v3.2+)
-FIRMWARE_BAUD=<B>      # the chip's UART baud (v3.2+)
-BRIDGE_BAUD=<B>        # consumed by S50uart_bridge → arms TCP:8888 at <B>
-                       # (no MODE= line; otbr-agent stays off)
+FIRMWARE=rcp           # what's in the EFR32 application slot
+FIRMWARE_BAUD=<B>      # chip-side UART baud — S50uart_bridge reads this and
+                       # arms TCP:8888 at <B> (no MODE= line; otbr-agent off)
 ```
 
 (No `FIRMWARE_VERSION` for RCP — the meaningful EmberZNet version is
@@ -321,7 +320,7 @@ cat /proc/tty/driver/serial
 # 1. Build the GBL at the desired baud (POSIX values only for RCP)
 cd 2-Zigbee-Radio-Silabs-EFR32/25-RCP-UART-HW && ./build_rcp.sh 230400
 
-# 2. Flash — radio.conf BRIDGE_BAUD is updated automatically
+# 2. Flash — radio.conf FIRMWARE_BAUD is updated automatically
 ./flash_efr32.sh -y rcp 230400
 
 # 3. Update UART_BAUDRATE in docker-compose-zigbee.yml (or cpcd.conf)
