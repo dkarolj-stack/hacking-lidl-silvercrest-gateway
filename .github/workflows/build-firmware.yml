@@ -1,0 +1,28 @@
+name: Build Firmware
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Build Docker image
+        run: |
+          cd 1-Build-Environment
+          docker build -t lidl-gateway-builder .
+      
+      - name: Build firmware
+        run: |
+          docker run --rm -v $(pwd):/workspace lidl-gateway-builder bash -c "
+            cd /workspace &&
+            ./build_fullflash.sh
+          "
+      
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: fullflash.bin
